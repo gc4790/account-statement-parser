@@ -1,0 +1,70 @@
+{
+  "columns": [
+    "Bhumi Silveriio  Co-Operative  Housing Society",
+    "Unnamed: 1",
+    "Unnamed: 2",
+    "Unnamed: 3",
+    "Unnamed: 4",
+    "Unnamed: 5",
+    "Unnamed: 6",
+    "Unnamed: 7",
+    "Unnamed: 8"
+  ],
+  "rows": [
+    [
+      "Bank Reconciliation for the period 01/04/2024 to 30/06/2024",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    [
+      "Opening Balance",
+      "1961003.79",
+      "",
+      "Closing Balance",
+      "2432025.87",
+      "",
+      "",
+      "dd-mm-yyyy",
+      ""
+    ],
+    [
+      "Any changes in the bank date for auto reconciled entries or status column will not be reflected",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    [
+      "Id",
+      "Date",
+      "Doc & No",
+      "Description",
+      "Cheque No/UTR No/Reference",
+      "Debit",
+      "Credit",
+      "Status",
+      "Bank Date"
+    ],
+    [
+      "685770777",
+      "2024-02-29 00:00:00",
+      "Advance Receipt - 294 (C1-804)",
+      "Advance online Payment\n Txn Id: 4a40dd94fc2c441483ae137bbf18cacf",
+      "UTR NO:AXNFCN0535675256\nTxn Id:4a40dd94fc2c441483ae137bbf18cacf",
+      "2200",
+      "0",
+      "Auto Reconciled",
+      "2024-03-01 00:00:00"
+    ]
+  ]
+}

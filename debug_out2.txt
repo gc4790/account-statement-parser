@@ -1,0 +1,67 @@
+--- Bank Rec ---
+Found 41 rows in Bank Rec containing '1202'
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '686451341', 'Unnamed: 1': '2024-03-01 00:00:00', 'Unnamed: 2': 'Advance Receipt - 297 (C2-1202)', '
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '706733471', 'Unnamed: 1': '2024-03-05 00:00:00', 'Unnamed: 2': 'Dues Receipt - 419 (C3-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '723661516', 'Unnamed: 1': '2024-04-03 00:00:00', 'Unnamed: 2': 'Dues Receipt - 509 (C3-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '723678581', 'Unnamed: 1': '2024-04-08 00:00:00', 'Unnamed: 2': 'Dues Receipt - 523 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '708576869', 'Unnamed: 1': '2024-04-12 00:00:00', 'Unnamed: 2': 'Dues Receipt - 462 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '718314877', 'Unnamed: 1': '2024-05-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 477 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '719979354', 'Unnamed: 1': '2024-05-04 00:00:00', 'Unnamed: 2': 'Dues Receipt - 481 (C1-804)', 'Unna
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '720808602', 'Unnamed: 1': '2024-05-06 00:00:00', 'Unnamed: 2': 'Dues Receipt - 493 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '731823853', 'Unnamed: 1': '2024-06-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 557 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '732797673', 'Unnamed: 1': '2024-06-03 00:00:00', 'Unnamed: 2': 'Dues Receipt - 562 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '745030850', 'Unnamed: 1': '2024-07-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 597 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '752719322', 'Unnamed: 1': '2024-07-11 00:00:00', 'Unnamed: 2': 'Dues Receipt - 617 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '762142432', 'Unnamed: 1': '2024-08-03 00:00:00', 'Unnamed: 2': 'Dues Receipt - 639 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '764660740', 'Unnamed: 1': '2024-08-09 00:00:00', 'Unnamed: 2': 'Dues Receipt - 652 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '772272338', 'Unnamed: 1': '2024-09-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 667 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '776348219', 'Unnamed: 1': '2024-09-10 00:00:00', 'Unnamed: 2': 'Dues Receipt - 688 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '784615038', 'Unnamed: 1': '2024-10-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 721 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '797357700', 'Unnamed: 1': '2024-11-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 763 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '798133165', 'Unnamed: 1': '2024-11-04 00:00:00', 'Unnamed: 2': 'Dues Receipt - 765 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '808339430', 'Unnamed: 1': '2024-12-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 800 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '808508111', 'Unnamed: 1': '2024-12-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 801 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '808339430', 'Unnamed: 1': '2024-12-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 800 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '808508111', 'Unnamed: 1': '2024-12-02 00:00:00', 'Unnamed: 2': 'Dues Receipt - 801 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '819431292', 'Unnamed: 1': '2025-01-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 843 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '819472541', 'Unnamed: 1': '2025-01-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 844 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '832468692', 'Unnamed: 1': '2025-02-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 894 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '840207737', 'Unnamed: 1': '2025-02-24 00:00:00', 'Unnamed: 2': 'Dues Receipt - 937 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '842333632', 'Unnamed: 1': '2025-03-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 940 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '842607496', 'Unnamed: 1': '2025-03-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 943 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '860557517', 'Unnamed: 1': '2025-04-04 00:00:00', 'Unnamed: 2': 'Dues Receipt - 997 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '819431292', 'Unnamed: 1': '2025-01-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 843 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '819472541', 'Unnamed: 1': '2025-01-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 844 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '842333632', 'Unnamed: 1': '2025-03-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 940 (C1-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '842607496', 'Unnamed: 1': '2025-03-01 00:00:00', 'Unnamed: 2': 'Dues Receipt - 943 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '860557517', 'Unnamed: 1': '2025-04-04 00:00:00', 'Unnamed: 2': 'Dues Receipt - 997 (C2-1202)', 'Unn
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '880686625', 'Unnamed: 1': '2025-05-05 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1042 (C1-1202)', 'Un
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '882660327', 'Unnamed: 1': '2025-05-08 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1046 (C2-1202)', 'Un
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '897225880', 'Unnamed: 1': '2025-06-04 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1081 (C2-1202)', 'Un
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '908956840', 'Unnamed: 1': '2025-06-28 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1112 (C1-1202)', 'Un
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '914522922', 'Unnamed: 1': '2025-07-03 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1125 (C1-1202)', 'Un
+{'Any changes in the bank date for auto reconciled entries or status column will not be reflected': '917519926', 'Unnamed: 1': '2025-07-07 00:00:00', 'Unnamed: 2': 'Dues Receipt - 1136 (C2-1202)', 'Un
+
+--- Acct Stmt ---
+Found 21 rows in Acct Stmt containing '1202'
+{0: '05/02/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025020572905373', 2: 'ICICN12025020572905373', 3: '05/02/25', 4: '', 5: '2200.0', 6: '855160.13'}
+{0: '10/02/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025021073293499', 2: 'ICICN12025021073293499', 3: '10/02/25', 4: '', 5: '2200.0', 6: '734217.13'}
+{0: '05/03/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025030574815601', 2: 'ICICN12025030574815601', 3: '05/03/25', 4: '', 5: '2200.0', 6: '686830.33'}
+{0: '06/03/25', 1: 'NEFT CR-ICIC0SF0002-AKSHAY SHIVAJI MOHITE-BHUMI SILVERIIO C SAHAKARI GRU-ICICN12025030674943023', 2: 'ICICN12025030674943023', 3: '06/03/25', 4: '', 5: '2200.0', 6: '663430.33'}
+{0: '10/03/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025031075175676', 2: 'ICICN12025031075175676', 3: '10/03/25', 4: '', 5: '2200.0', 6: '690630.33'}
+{0: '03/04/25', 1: 'NEFT CR-ICIC0SF0002-AKSHAY SHIVAJI MOHITE-BHUMI SILVERIIO C SAHAKARI GRU-ICICN12025040376721248', 2: 'ICICN12025040376721248', 3: '03/04/25', 4: '', 5: '2200.0', 6: '777408.63'}
+{0: '05/04/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025040576894137', 2: 'ICICN12025040576894137', 3: '05/04/25', 4: '', 5: '2200.0', 6: '821220.63'}
+{0: '06/04/25', 1: 'NEFT CR-ICIC0SF0002-DHIRAJ VISHNUBHAI KHACHCHE-BHUMI SILVERIO C SAHAKARI GRUH-ICICN12025040677010822', 2: 'ICICN12025040677010822', 3: '06/04/25', 4: '', 5: '14400.0', 6: '872620.6
+{0: '10/04/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025041077264647', 2: 'ICICN12025041077264647', 3: '10/04/25', 4: '', 5: '2200.0', 6: '817870.63'}
+{0: '10/04/25', 1: 'NEFT CR-ICIC0SF0002-PRAMOD JAGANNATH CHOUDHARI-BHUMI SILVERIO C SAHAKARI GRUH-ICICN12025041077323688', 2: 'ICICN12025041077323688', 3: '10/04/25', 4: '', 5: '75000.0', 6: '895270.6
+{0: '05/05/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025050578748236', 2: 'ICICN12025050578748236', 3: '05/05/25', 4: '', 5: '2200.0', 6: '944815.01'}
+{0: '10/05/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025051079132073', 2: 'ICICN12025051079132073', 3: '10/05/25', 4: '', 5: '2200.0', 6: '1014295.51'}
+{0: '17/05/25', 1: 'NEFT CR-YESB0000001-VIVISH TECHNOLOGIES PVT LTD-BHUMI SILVERIIO C SAHAKARI GRUH SAN-YESBN12025051703711238', 2: 'YESBN12025051703711238', 3: '17/05/25', 4: '', 5: '2200.0', 6: '102
+{0: '17/05/25', 1: 'NEFT CR-YESB0000001-VIVISH TECHNOLOGIES PVT LTD-BHUMI SILVERIIO C SAHAKARI GRUH SAN-YESBN12025051703743309', 2: 'YESBN12025051703743309', 3: '17/05/25', 4: '', 5: '2200.0', 6: '103
+{0: '19/05/25', 1: 'NEFT CR-YESB0000001-VIVISH TECHNOLOGIES PVT LTD-BHUMI SILVERIIO C SAHAKARI GRUH SAN-YESBN12025051905803768', 2: 'YESBN12025051905803768', 3: '19/05/25', 4: '', 5: '2238.5', 6: '116
+{0: '05/06/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025060580752719', 2: 'ICICN12025060580752719', 3: '05/06/25', 4: '', 5: '2200.0', 6: '1161762.51'}
+{0: '05/06/25', 1: 'NEFT CR-ICIC0SF0002-AKSHAY SHIVAJI MOHITE-BHUMI SILVERIIO C SAHAKARI GRU-ICICN12025060580778784', 2: 'ICICN12025060580778784', 3: '05/06/25', 4: '', 5: '2200.0', 6: '1163962.51'}
+{0: '10/06/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025061081091653', 2: 'ICICN12025061081091653', 3: '10/06/25', 4: '', 5: '2200.0', 6: '1168040.51'}
+{0: '01/07/25', 1: 'NEFT CR-ICIC0SF0002-AKSHAY SHIVAJI MOHITE-BHUMI SILVERIIO C SAHAKARI GRU-ICICN12025070182296930', 2: 'ICICN12025070182296930', 3: '02/07/25', 4: '', 5: '2200.0', 6: '1236845.51'}
+{0: '05/07/25', 1: 'NEFT CR-ICIC0SF0002-KISHORE KUNAL .-BHUMI SILVERIIO C SAHAKARI GRUH SAN-ICICN12025070582614209', 2: 'ICICN12025070582614209', 3: '05/07/25', 4: '', 5: '2200.0', 6: '1291186.01'}
+{0: '10/07/25', 1: 'NEFT CR-ICIC0SF0002-PANKAJ RADHAKRISHNA TELI-BHUMI C WING SOCIETY-ICICN12025071082973266', 2: 'ICICN12025071082973266', 3: '10/07/25', 4: '', 5: '2200.0', 6: '1217094.01'}
