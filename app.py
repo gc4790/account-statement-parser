@@ -642,42 +642,84 @@ elif app_mode == "🏢 Flat Management":
             
         selected_flat = st.selectbox("🎯 Select Flat to Calculate For", ["-- Select Flat --"] + flat_list)
         
+        # --- Year selector ---
+        current_year = 2026
+        year_options = list(range(2020, current_year + 2))
+        selected_year = st.selectbox("📅 Select Financial Year", year_options, index=year_options.index(current_year))
+        
         summary_container = st.container()
             
-        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        month_abbrevs = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        months_with_year = [f"{m} {selected_year}" for m in month_abbrevs]
+
         if "calc_df" not in st.session_state:
             st.session_state.calc_df = pd.DataFrame({
-                "Month": months,
+                "Month": months_with_year,
                 "Base Dues": [base_dues] * 12,
                 "Payment Received": [0.0] * 12,
             })
             st.session_state.calc_key = 0
+            st.session_state.calc_year = selected_year
             
-        # Detect flat change and auto-fill payments from DB
+        # Detect flat or year change and auto-fill payments from DB
         if "last_selected_flat" not in st.session_state:
             st.session_state.last_selected_flat = "-- Select Flat --"
+        if "calc_year" not in st.session_state:
+            st.session_state.calc_year = selected_year
             
-        if selected_flat != st.session_state.last_selected_flat:
+        flat_changed = selected_flat != st.session_state.last_selected_flat
+        year_changed  = selected_year != st.session_state.calc_year
+
+        if flat_changed or year_changed:
             st.session_state.last_selected_flat = selected_flat
-            
-            # Reset payments to 0 on swap
-            st.session_state.calc_df["Payment Received"] = 0.0
+            st.session_state.calc_year = selected_year
+
+            # Rebuild month list with new year
+            months_with_year = [f"{m} {selected_year}" for m in month_abbrevs]
+            st.session_state.calc_df = pd.DataFrame({
+                "Month": months_with_year,
+                "Base Dues": [base_dues] * 12,
+                "Payment Received": [0.0] * 12,
+            })
             
             if selected_flat != "-- Select Flat --":
                 try:
                     import sqlalchemy
                     engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
-                    df_hist = pd.read_sql(f"SELECT `Month`, `Amount` FROM payment_history WHERE `Flat Number` = '{selected_flat}'", con=engine)
+                    # Fetch payments only for the selected year
+                    df_hist = pd.read_sql(
+                        f"SELECT `Month`, `Amount`, `Date` FROM payment_history "
+                        f"WHERE `Flat Number` = '{selected_flat}'",
+                        con=engine
+                    )
                     
                     if not df_hist.empty:
-                        # Extract the 3 letter month abbreviation (e.g. AUG-2025 -> Aug)
-                        df_hist['Month_Short'] = df_hist['Month'].astype(str).str[:3].str.title()
-                        
-                        # Sum payments per month in case of multiple transactions
+                        # Filter rows whose Date falls in the selected year
+                        df_hist['Year'] = pd.to_datetime(df_hist['Date'], errors='coerce').dt.year
+                        df_hist = df_hist[df_hist['Year'] == selected_year]
+
+                        # Extract 3-letter month abbreviation from the Month field
+                        # Month in DB may look like 'APR-2024', 'Apr', 'April' etc.
+                        def parse_month_abbrev(val):
+                            import re
+                            s = str(val).strip()
+                            # Try reading as a date string first
+                            try:
+                                return pd.to_datetime(s).strftime('%b')
+                            except Exception:
+                                pass
+                            # Extract first 3 letters
+                            letters = re.sub(r'[^a-zA-Z]', '', s)[:3].title()
+                            return letters if letters else ''
+
+                        df_hist['Month_Short'] = df_hist['Month'].apply(parse_month_abbrev)
+
+                        # Match against 'Mon YYYY' format in calc_df
                         monthly_totals = df_hist.groupby('Month_Short')['Amount'].sum().reset_index()
-                        
+
                         for _, row in monthly_totals.iterrows():
-                            idx = st.session_state.calc_df[st.session_state.calc_df['Month'] == row['Month_Short']].index
+                            label = f"{row['Month_Short']} {selected_year}"
+                            idx = st.session_state.calc_df[st.session_state.calc_df['Month'] == label].index
                             if not idx.empty:
                                 st.session_state.calc_df.loc[idx[0], 'Payment Received'] = float(row['Amount'])
                                 
@@ -715,8 +757,24 @@ elif app_mode == "🏢 Flat Management":
         
         # Calculation Engine
         results = []
-        forward_principal = 0.0  # Positive = Arrears (Owed to Society), Negative = Advance (Credit)
-        accumulated_penalty = 0.0 # Running total of penalties, not added to principal
+
+        # --- Seed opening principal with carry-forward outstanding (from Upload Payments) ---
+        carry_forward_opening = 0.0
+        if selected_flat != "-- Select Flat --":
+            try:
+                import sqlalchemy as _sqla_calc
+                _cf_eng = _sqla_calc.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                _cf_res = pd.read_sql(
+                    f"SELECT `Outstanding` FROM flat_carry_forward WHERE `Flat Number` = '{selected_flat}' LIMIT 1",
+                    con=_cf_eng,
+                )
+                if not _cf_res.empty:
+                    carry_forward_opening = float(_cf_res.iloc[0]["Outstanding"])
+            except Exception:
+                carry_forward_opening = 0.0
+
+        forward_principal = carry_forward_opening  # Opening arrears = carry-forward outstanding
+        accumulated_penalty = 0.0  # Running total of penalties, not added to principal
 
         for idx, row in edited_df.iterrows():
             month = row["Month"]
@@ -802,8 +860,29 @@ elif app_mode == "🏢 Flat Management":
             display_df[col] = display_df[col].apply(format_currency)
             
         st.markdown(f"#### 📊 Final Computed Ledger (Simple Interest) for {selected_flat if selected_flat != '-- Select Flat --' else 'Pending Selection'}")
+        
+        # Show carry-forward banner if available
+        if selected_flat != "-- Select Flat --":
+            try:
+                import sqlalchemy as _sqla_cf
+                _cf_preview = pd.read_sql(
+                    f"SELECT `Outstanding` FROM flat_carry_forward WHERE `Flat Number` = '{selected_flat}' LIMIT 1",
+                    con=_sqla_cf.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"),
+                )
+                if not _cf_preview.empty:
+                    _cf_val = float(_cf_preview.iloc[0]["Outstanding"])
+                    st.markdown(
+                        f"""<div style="background:linear-gradient(90deg,#fca311,#e3910c);padding:12px 20px;border-radius:10px;
+                        font-size:1.1rem;font-weight:700;color:#000;margin-bottom:12px;">
+                        📌 Carry Forward (Opening Outstanding): ₹{_cf_val:,.2f}</div>""",
+                        unsafe_allow_html=True,
+                    )
+            except Exception:
+                pass
+
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
+
         # --- Final Flat Metrics ---
         if selected_flat != "-- Select Flat --":
             with summary_container:
@@ -815,13 +894,45 @@ elif app_mode == "🏢 Flat Management":
                 final_penalties = accumulated_penalty
                 final_total_obligation = final_principal + final_penalties
                 
-                m1, m2, m3 = st.columns(3)
+                # Fetch carry forward amount (first outstanding) for the selected flat
+                carry_forward = 0.0
+                if selected_flat != "-- Select Flat --":
+                    try:
+                        cf_df = pd.read_sql(
+                            f"SELECT `Outstanding` FROM flat_carry_forward WHERE `Flat Number` = '{selected_flat}' LIMIT 1",
+                            con=engine,
+                        )
+                        if not cf_df.empty:
+                            carry_forward = float(cf_df.iloc[0]["Outstanding"])
+                    except Exception as e:
+                        st.warning(f"Could not fetch carry forward amount: {e}")
+
+                # Display final metrics including Carry Forward
+                m1, m2, m3, m4 = st.columns(4)
                 with m1:
-                    st.metric("Total Principal Outstanding", f"₹{final_principal:,.2f}" if final_principal > 0 else f"₹0.00 (Advance: ₹{abs(final_principal):,.2f})")
+                    st.metric(
+                        "Total Principal Outstanding",
+                        f"₹{final_principal:,.2f}"
+                        if final_principal > 0
+                        else f"₹0.00 (Advance: ₹{abs(final_principal):,.2f})",
+                    )
                 with m2:
                     st.metric("Total Unpaid Penalty", f"₹{final_penalties:,.2f}")
                 with m3:
-                    st.metric("Final Total Obligation", f"₹{final_total_obligation:,.2f}", delta="Action Required" if final_total_obligation > 0 else "All Clear", delta_color="inverse")
+                    st.metric(
+                        "Carry Forward Amount",
+                        f"₹{carry_forward:,.2f}",
+                        delta="Included",
+                        delta_color="inverse",
+                    )
+                with m4:
+                    total_obligation = final_total_obligation + carry_forward
+                    st.metric(
+                        "Final Total Obligation",
+                        f"₹{total_obligation:,.2f}",
+                        delta="Action Required" if total_obligation > 0 else "All Clear",
+                        delta_color="inverse",
+                    )
                 st.markdown("---")
 
 
@@ -916,7 +1027,13 @@ elif app_mode == "📤 Upload Payments":
                                     clean_df["Month"] = clean_df.apply(derive_month, axis=1)
 
                                     
-                                keep_cols = [c for c in ["Month", "Date", "Narration", "Amount"] if c in clean_df.columns]
+                                # Also capture Outstanding column for carry-forward
+                                if "Outstanding" in clean_df.columns:
+                                    clean_df["Outstanding"] = pd.to_numeric(clean_df["Outstanding"], errors='coerce').fillna(0)
+                                else:
+                                    clean_df["Outstanding"] = 0.0
+
+                                keep_cols = [c for c in ["Month", "Date", "Narration", "Amount", "Outstanding"] if c in clean_df.columns]
                                 final_df = clean_df[keep_cols].copy()
                                 final_df.insert(0, "Flat Number", sheet)
                                 if "Amount" in final_df.columns:
@@ -1019,6 +1136,7 @@ elif app_mode == "📤 Upload Payments":
                                     with engine.connect() as conn:
                                         # Composite unique key: (Flat Number, Month, Date, Amount)
                                         # narration_ref stored for reference but NOT used as unique key
+                                        # Create payment_history with Outstanding column
                                         conn.execute(sqlalchemy.text("""
                                             CREATE TABLE IF NOT EXISTS payment_history (
                                                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1027,8 +1145,26 @@ elif app_mode == "📤 Upload Payments":
                                                 `Date` VARCHAR(20),
                                                 `Narration` TEXT,
                                                 `Amount` DECIMAL(12,2),
+                                                `Outstanding` DECIMAL(12,2) DEFAULT 0,
                                                 `narration_ref` VARCHAR(100),
                                                 UNIQUE KEY uq_payment (`Flat Number`, `Month`, `Date`, `Amount`)
+                                            )
+                                        """))
+                                        # Add Outstanding column if it doesn't exist yet (migration)
+                                        try:
+                                            conn.execute(sqlalchemy.text("""
+                                                ALTER TABLE payment_history
+                                                ADD COLUMN IF NOT EXISTS `Outstanding` DECIMAL(12,2) DEFAULT 0
+                                            """))
+                                        except Exception:
+                                            pass  # column already exists
+                                        # Create carry-forward table
+                                        conn.execute(sqlalchemy.text("""
+                                            CREATE TABLE IF NOT EXISTS flat_carry_forward (
+                                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                                `Flat Number` VARCHAR(50) UNIQUE,
+                                                `Outstanding` DECIMAL(12,2) DEFAULT 0,
+                                                `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                                             )
                                         """))
                                         conn.commit()
@@ -1040,14 +1176,15 @@ elif app_mode == "📤 Upload Payments":
                                             try:
                                                 result = conn.execute(sqlalchemy.text("""
                                                     INSERT IGNORE INTO payment_history 
-                                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`)
-                                                    VALUES (:flat, :month, :date, :narration, :amount, :ref)
+                                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                                    VALUES (:flat, :month, :date, :narration, :amount, :outstanding, :ref)
                                                 """), {
                                                     "flat": row.get("Flat Number", ""),
                                                     "month": row.get("Month", ""),
                                                     "date": str(row.get("Date", "")),
                                                     "narration": row.get("Narration", ""),
                                                     "amount": float(row.get("Amount", 0)),
+                                                    "outstanding": float(row.get("Outstanding", 0)),
                                                     "ref": row.get("narration_ref", None)
                                                 })
                                                 if result.rowcount > 0:
@@ -1057,9 +1194,33 @@ elif app_mode == "📤 Upload Payments":
                                             except Exception:
                                                 skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
                                         conn.commit()
-                                
+
+                                        # --- Store first Outstanding per flat into flat_carry_forward ---
+                                        # Group combined data by Flat Number, take the first row's Outstanding
+                                        carry_rows = (
+                                            combined.groupby("Flat Number", sort=False)
+                                            .first()
+                                            .reset_index()[["Flat Number", "Outstanding"]]
+                                        )
+                                        cf_saved = 0
+                                        for _, cf_row in carry_rows.iterrows():
+                                            try:
+                                                conn.execute(sqlalchemy.text("""
+                                                    INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
+                                                    VALUES (:flat, :outstanding)
+                                                    ON DUPLICATE KEY UPDATE `Outstanding` = VALUES(`Outstanding`)
+                                                """), {
+                                                    "flat": cf_row["Flat Number"],
+                                                    "outstanding": float(cf_row["Outstanding"]),
+                                                })
+                                                cf_saved += 1
+                                            except Exception:
+                                                pass
+                                        conn.commit()
+                                 
                                 skipped = len(skipped_rows)
                                 st.success(f"✅ {inserted} payment(s) saved. {skipped} duplicate(s) skipped.")
+                                st.info(f"📌 Carry forward amount stored/updated for {cf_saved} flat(s).")
                                 if skipped_rows:
                                     st.warning(f"⚠️ The following {skipped} transaction(s) were skipped (already in DB):")
                                     skipped_df = pd.DataFrame(skipped_rows).reset_index(drop=True)
