@@ -1,6 +1,44 @@
 import streamlit as st
 import pandas as pd
 import os
+import json
+
+SETTINGS_FILE = "society_settings.json"
+
+def load_settings():
+    default_settings = {
+        "base_maintenance": 2500.0,
+        "penalty_apr": 18.0, # Annual Percentage Rate (18% == 1.5% monthly)
+        "grace_period_day": 10
+    }
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f:
+                settings = json.load(f)
+                default_settings.update(settings)
+        except:
+            pass
+    return default_settings
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=4)
+
+DB_CONFIG_FILE = "db_config.json"
+
+def load_db_config():
+    default = {"host": "localhost", "port": "3306", "user": "root", "password": "root", "database": "society_plus"}
+    if os.path.exists(DB_CONFIG_FILE):
+        try:
+            with open(DB_CONFIG_FILE, "r") as f:
+                default.update(json.load(f))
+        except:
+            pass
+    return default
+
+def save_db_config(cfg):
+    with open(DB_CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=4)
 
 # --- Page Config & Styling ---
 st.set_page_config(
@@ -77,8 +115,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-st.title("🧾 Account Statement Parser")
-st.markdown('<p class="info-text">Search for transactions by Flat No., Owner Name, or Reference ID</p>', unsafe_allow_html=True)
+# Main title logic moved into dedicated view blocks below
 
 
 @st.cache_data
@@ -120,64 +157,27 @@ def load_bank_rec_data(file_source):
 
 # --- Navigation ---
 st.sidebar.markdown("## 🧭 Navigation")
-app_mode = st.sidebar.radio("Select View:", ["🔍 Transaction Search", "🏢 Flat Management"])
+app_mode = st.sidebar.radio("Select View:", ["🔍 Transaction Search", "🏢 Flat Management", "📤 Upload Payments", "⚙️ Settings"])
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("## 💾 Database Sync")
-st.sidebar.markdown("Store your parsed records permanently in MySQL.")
+# --- Load DB config globally (used across all pages) ---
+_cfg = load_db_config()
+db_host = _cfg["host"]
+db_port = _cfg["port"]
+db_user = _cfg["user"]
+db_pass = _cfg["password"]
+db_name = _cfg["database"]
 
-with st.sidebar.expander("MySQL Connection Settings", expanded=False):
-    db_host = st.text_input("Host", value="localhost")
-    db_port = st.text_input("Port", value="3306")
-    db_user = st.text_input("Username", value="root")
-    db_pass = st.text_input("Password", value="root", type="password")
-    db_name = st.text_input("Database Name", value="society_plus")
-    
-    if st.button("🔄 Sync to MySQL", use_container_width=True):
-        if "df_stmt" not in st.session_state or st.session_state.df_stmt is None or len(st.session_state.df_stmt) == 0:
-            st.error("⚠️ No Account Statement data loaded to sync.")
-        elif "df_rec" not in st.session_state or st.session_state.df_rec is None or len(st.session_state.df_rec) == 0:
-            st.error("⚠️ No Bank Reconciliation data loaded to sync.")
-        else:
-            try:
-                import sqlalchemy
-                # create database if not exists
-                temp_engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}")
-                with temp_engine.connect() as conn:
-                    conn.execute(sqlalchemy.text(f"CREATE DATABASE IF NOT EXISTS {db_name}"))
-                
-                # connect to the specific database
-                engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
-                
-                with st.spinner("Syncing data to MySQL..."):
-                    # Create copies for SQL to avoid mutating the UI dataframes
-                    sql_df_stmt = st.session_state.df_stmt.copy()
-                    sql_df_rec = st.session_state.df_rec.copy()
-                    
-                    import re
-                    def sanitize_col(col_name):
-                        name = str(col_name).strip()
-                        if len(name) > 60: name = name[:60]  # MySQL limit is 64 chars
-                        name = re.sub(r'[^a-zA-Z0-9]', '_', name) # Replace weird chars with underscore
-                        return name.strip('_')
-
-                    sql_df_stmt.columns = [sanitize_col(c) for c in sql_df_stmt.columns]
-                    sql_df_rec.columns = [sanitize_col(c) for c in sql_df_rec.columns]
-                    
-                    sql_df_stmt.to_sql(name="account_statement", con=engine, if_exists="replace", index=False)
-                    sql_df_rec.to_sql(name="bank_reconciliation", con=engine, if_exists="replace", index=False)
-                
-                st.success(f"✅ Successfully synced tables to `{db_name}`.")
-            except Exception as e:
-                st.error(f"❌ Database Error: {e}")
 
 if "df_stmt" not in st.session_state:
     st.session_state.df_stmt = None
 if "df_rec" not in st.session_state:
     st.session_state.df_rec = None
 
-# Show file uploader only in Transaction Search mode OR if files aren't loaded yet
-if app_mode == "🔍 Transaction Search" or st.session_state.df_stmt is None or st.session_state.df_rec is None:
+# Show file uploader only in Transaction Search mode
+if app_mode == "🔍 Transaction Search":
+    st.title("🧾 Account Statement Parser")
+    st.markdown('<p class="info-text">Search for transactions by Flat No., Owner Name, or Reference ID</p>', unsafe_allow_html=True)
+    
     # --- File Upload ---
     if st.session_state.df_stmt is not None:
         st.success("✅ Files are loaded in memory. Upload new files below if you need to update them.")
@@ -192,14 +192,19 @@ if app_mode == "🔍 Transaction Search" or st.session_state.df_stmt is None or 
         st.session_state.df_stmt = load_statement_data(stmt_file)
         st.session_state.df_rec = load_bank_rec_data(rec_file)
 
-if st.session_state.df_stmt is None or st.session_state.df_rec is None:
-    st.info("👆 Please upload **BOTH** the Account Statement AND the Bank Reconciliation files to continue.")
-    st.stop()
+    if st.session_state.df_stmt is None or st.session_state.df_rec is None:
+        st.info("👆 Please upload **BOTH** the Account Statement AND the Bank Reconciliation files to continue.")
+        st.stop()
 
 df_stmt = st.session_state.df_stmt
 df_rec = st.session_state.df_rec
 
 import re
+
+# Initialize variables to avoid NameErrors globally across all views
+search_query = ""
+date_filter = []
+search_col_opt = "Both Col B & C"
 
 if app_mode == "🔍 Transaction Search":
     # --- Search & Filter Interface ---
@@ -214,34 +219,18 @@ if app_mode == "🔍 Transaction Search":
 
     with col3:
         date_filter = st.date_input("Filter by Date Range", value=[])
-else:
-    st.markdown("### 🏢 Flat Account Management")
-    # Extract unique flats securely
-    flats = set()
-    col_b_name = "Narration (Col B)" if "Narration (Col B)" in df_stmt.columns else df_stmt.columns[1]
-    for val in df_stmt[col_b_name].dropna():
-        matches = re.findall(r'\b[A-Za-z]\d[\s\-]\d{3,4}\b', str(val))
-        for m in matches: flats.add(m.replace(' ', '-').upper())
-        
-    for col in df_rec.columns:
-        if 'doc' in col.lower() or 'desc' in col.lower() or 'unnamed' in col.lower():
-            for val in df_rec[col].dropna():
-                matches = re.findall(r'\b[A-Za-z]\d[\s\-]\d{3,4}\b', str(val))
-                for m in matches: flats.add(m.replace(' ', '-').upper())
-            
-    sorted_flats = ["Select a Flat..."] + sorted(list(flats))
+elif app_mode == "🏢 Flat Management":
+    st.title("🏢 Flat Account Management")
+    st.markdown('<p class="info-text">View your reconciled financial ledgers and manage the resident database below.</p>', unsafe_allow_html=True)
     
-    col1, col3 = st.columns([3, 1])
-    with col1:
-        selected_flat = st.selectbox("Select Flat Number", sorted_flats)
-    with col3:
-        date_filter = st.date_input("Filter by Date Range", value=[], key='flat_date')
-        
-    search_col_opt = "Both Col B & C"
-    search_query = selected_flat if selected_flat != "Select a Flat..." else ""
+    tab_search, tab_upload, tab_calc = st.tabs(["🔍 Search Flat Details", "📥 Bulk Upload Tenant/Owner DB", "🧮 Maintenance Calculator"])
+    
+    with tab_search:
+        search_query = st.text_input("🔍 Search Database", placeholder="Type Flat No, Owner, Tenant name or Contact...")
+
 
 # --- Apply Date Filter First ---
-if len(date_filter) == 2:
+if len(date_filter) == 2 and df_stmt is not None and df_rec is not None:
     start_date, end_date = date_filter
     
     # Filter Statement safely
@@ -260,7 +249,7 @@ if len(date_filter) == 2:
 st.markdown("---")
 
 # --- Filtering Logic ---
-if search_query:
+if search_query and df_stmt is not None and df_rec is not None:
     import re
     # Validate that no space is used in flat number formats (e.g. "C1 " or "- " is not allowed) if it looks like a flat
     if re.search(r'^[a-zA-Z]\d\s', search_query) or '- ' in search_query or ' -' in search_query:
@@ -340,31 +329,14 @@ else:
     filtered_df_stmt = df_stmt
     filtered_df_rec = df_rec
 
-# --- Display Results ---
-
 # Metrics Row
-if app_mode == "🏢 Flat Management" and search_query:
-    total_deposit = 0.0
-    if "Deposit" in filtered_df_stmt.columns:
-        total_deposit = pd.to_numeric(filtered_df_stmt["Deposit"].replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0).sum()
-        
-    total_debit = 0.0
-    total_credit = 0.0
-    for col in filtered_df_rec.columns:
-        if 'debit' in str(col).lower() or 'unnamed: 5' in str(col).lower():
-            total_debit += pd.to_numeric(filtered_df_rec[col].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0).sum()
-        if 'credit' in str(col).lower() or 'unnamed: 6' in str(col).lower():
-            total_credit += pd.to_numeric(filtered_df_rec[col].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0).sum()
-
-    fm1, fm2, fm3, fm4 = st.columns(4)
-    fm1.metric("Selected Flat", search_query)
-    fm2.metric("Total Dues (Debit)", f"₹ {total_debit:,.2f}")
-    fm3.metric("Total Paid (Credit)", f"₹ {total_credit:,.2f}")
-    fm4.metric("Total Statement Deposits", f"₹ {total_deposit:,.2f}")
-else:
+if app_mode == "🔍 Transaction Search":
     col_m1, col_m2 = st.columns(2)
     with col_m1:
-        st.metric(label="Total Matches", value=(len(filtered_df_stmt) + len(filtered_df_rec)))
+        total = 0
+        if filtered_df_stmt is not None and filtered_df_rec is not None:
+            total = len(filtered_df_stmt) + len(filtered_df_rec)
+        st.metric(label="Total Matches", value=total)
     with col_m2:
         if search_query:
             st.metric(label="Total Search Status", value="Filtered", delta="Active Search")
@@ -520,49 +492,683 @@ if app_mode == "🔍 Transaction Search":
 
 elif app_mode == "🏢 Flat Management":
     st.markdown("---")
-    if search_query:
-        st.markdown(f"### 📋 Financial Ledger for Flat: {search_query}")
-    else:
-        st.markdown("### 📋 Financial Ledger (All Flats)")
-        
-    st.markdown('<p class="info-text" style="font-size: 0.95rem;">Grouped transactions sorted logically to easily verify dues against payments.</p>', unsafe_allow_html=True)
     
-    # Identify Debit and Credit Columns dynamically
-    debit_col = None
-    credit_col = None
-    for col in filtered_df_rec.columns:
-        if 'debit' in str(col).lower() or 'unnamed: 5' in str(col).lower(): debit_col = col
-        if 'credit' in str(col).lower() or 'unnamed: 6' in str(col).lower(): credit_col = col
-        
-    # Split the Bank Rec into Dues and Payments
-    if debit_col and credit_col and len(filtered_df_rec) > 0:
-        df_dues = filtered_df_rec[pd.to_numeric(filtered_df_rec[debit_col].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0) > 0]
-        df_payments = filtered_df_rec[pd.to_numeric(filtered_df_rec[credit_col].astype(str).replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0) > 0]
-    else:
-        df_dues = pd.DataFrame()
-        df_payments = pd.DataFrame()
+    with tab_search:
+        if search_query:
+            try:
+                import sqlalchemy
+                engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                
+                query = f"""
+                SELECT * FROM flat_details 
+                WHERE `Flat No` LIKE '%%{search_query}%%' 
+                   OR `Owner Name` LIKE '%%{search_query}%%' 
+                   OR `Tenant Name` LIKE '%%{search_query}%%' 
+                   OR CAST(`Contact Number` AS CHAR) LIKE '%%{search_query}%%'
+                """
+                df_flat = pd.read_sql(query, con=engine)
+                
+                if not df_flat.empty:
+                    st.success(f"✅ Found {len(df_flat)} matching resident(s)")
+                    for _, info in df_flat.iterrows():
+                        flat_no = info.get("Flat No", "N/A")
+                        owner = info.get("Owner Name", "N/A")
+                        is_rented = info.get("Rented Status", "No")
+                        tenant = info.get("Tenant Name", "N/A") if is_rented == "Yes" else "N/A"
+                        contact = info.get("Contact Number", "N/A")
+                        f_type = info.get("Flat Type", "N/A")
+                        f_area = info.get("Area (sq ft)", "N/A")
+                        
+                        st.info(f"### 🚪 Flat {flat_no}\n**👤 Owner:** {owner} &nbsp;&nbsp;|&nbsp;&nbsp; **📞 Contact:** {contact} &nbsp;&nbsp;|&nbsp;&nbsp; **🏠 Type:** {f_type} ({f_area} sq ft)\n\n**🔑 Rented:** {is_rented} &nbsp;&nbsp;|&nbsp;&nbsp; **🧑‍🤝‍🧑 Tenant:** {tenant}")
+                else:
+                    st.warning("⚠️ No matching flats found in the database. Try adjusting your search term.")
+            except Exception as e:
+                st.error(f"Search error: {e}")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### 🔴 Invoiced Dues (To Bank)")
-        if len(df_dues) > 0:
-            st.dataframe(df_dues, use_container_width=True, hide_index=True, height=350)
-        else:
-            st.info("No Dues found.")
+    with tab_upload:
+        st.markdown("### 🏠 Flat & Tenant Database")
+        st.markdown('<p class="info-text">Manage flat owners, tenant details, and area specifications natively in MySQL.</p>', unsafe_allow_html=True)
+        
+        try:
+            import sqlalchemy
+            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
             
-    with c2:
-        st.markdown("#### 🟢 Payments Received (From Bank)")
-        if len(df_payments) > 0:
-            st.dataframe(df_payments, use_container_width=True, hide_index=True, height=350)
-        else:
-            st.info("No Payments logged in Bank Rec.")
+            flat_file = st.file_uploader("📥 Bulk Upload Flat & Tenant Details (.xls / .xlsx)", type=["xls", "xlsx"], key="flat_upload")
             
+            try:
+                df_flat_db = pd.read_sql("SELECT * FROM flat_details", con=engine)
+            except Exception:
+                df_flat_db = pd.DataFrame(columns=[
+                    "Flat No", "Owner Name", "Rented Status", "Tenant Name", "Flat Type", "Area (sq ft)", "Contact Number", "Email ID"
+                ])
+                
+            if flat_file is not None:
+                try:
+                    # Quick validation to prevent Payment File upload here
+                    xl_preview = pd.ExcelFile(flat_file)
+                    if len(xl_preview.sheet_names) > 50 and any('C1-' in s for s in xl_preview.sheet_names):
+                        st.error("🛑 STOP! You uploaded the **Payment / Maintenance** file here!\n\nThis upload box is ONLY for the **Tenant & Owner Database**. To upload parsed payment records, please click **'📤 Upload Payments'** in the gray Navigation Sidebar on the far left!")
+                        df_flat = df_flat_db
+                    else:
+                        df_upload = pd.read_excel(flat_file, header=None)
+                        
+                        # 1. Dynamically find the header row by looking for 'Flat No'
+                        header_idx = None
+                        for i, row in df_upload.iterrows():
+                            if row.astype(str).str.contains(r'Flat\s*No', case=False, na=False).any():
+                                header_idx = i
+                                break
+                                
+                        if header_idx is not None:
+                            df_upload.columns = df_upload.iloc[header_idx]
+                            df_upload = df_upload.iloc[header_idx + 1:].reset_index(drop=True)
+                            
+                        # 2. Map custom columns to the database schema
+                        rename_map = {}
+                        for col in df_upload.columns:
+                            col_str = str(col).strip().lower()
+                            if 'owner' in col_str:
+                                rename_map[col] = 'Owner Name'
+                            elif 'flat no' in col_str:
+                                rename_map[col] = 'Flat No'
+                            elif 'mobile' in col_str or 'contact' in col_str:
+                                rename_map[col] = 'Contact Number'
+                            elif 'tenant' in col_str:
+                                rename_map[col] = 'Tenant Name'
+                        
+                        if rename_map:
+                            df_upload.rename(columns=rename_map, inplace=True)
+
+                        # Ensure schema matches by adding missing expected columns
+                        for col in df_flat_db.columns:
+                            if col not in df_upload.columns:
+                                df_upload[col] = None
+                                
+                        # Remove trailing NaNs
+                        df_upload.dropna(subset=['Flat No'], inplace=True)
+                        
+                        # Reorder/filter to strictly match the expected DB schema
+                        df_flat = df_upload[[c for c in df_flat_db.columns if c in df_upload.columns]]
+                        st.success("✅ Tenant DB file loaded! Review the data below and click **Save Database Changes** to safely write this into MySQL.")
+                except Exception as e:
+                    st.error(f"Error reading uploaded file: {e}")
+                    df_flat = df_flat_db
+            else:
+                df_flat = df_flat_db
+                
+            edited_df = st.data_editor(
+                df_flat, 
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Rented Status": st.column_config.SelectboxColumn("Rented Status", options=["Yes", "No"], required=True),
+                    "Flat Type": st.column_config.SelectboxColumn("Flat Type", options=["1 BHK", "2 BHK", "3 BHK", "4 BHK", "Penthouse"]),
+                }
+            )
+            
+            if st.button("💾 Save Database Changes", type="primary"):
+                with st.spinner("Saving to MySQL..."):
+                    edited_df.to_sql(name="flat_details", con=engine, if_exists="replace", index=False)
+                st.success("✅ Changes successfully saved to `society_plus` database!")
+        except Exception as e:
+            st.error(f"❌ Failed to connect to MySQL. Ensure your credentials in the sidebar are correct. Error: {e}")
+
+    with tab_calc:
+        st.markdown("### 🧮 Maintenance Ledger & Penalty Calculator")
+        st.markdown('<p class="info-text">Simulate and calculate resident maintenance dues with automatic penalty and overpayment forwarding logic.</p>', unsafe_allow_html=True)
+        
+        society_settings = load_settings()
+        
+        # Pull configuration silently from Global Settings
+        base_dues = float(society_settings["base_maintenance"])
+        penalty_apr = float(society_settings.get("penalty_apr", 18.0))
+        grace_day = int(society_settings["grace_period_day"])
+        
+        monthly_interest_rate = penalty_apr / 12 / 100
+        
+        st.info(f"⚙️ **Active Global Policy:** {penalty_apr}% Annual Penalty applied to unpaid dues after day {grace_day} of each month.")
+        
+        # Connect to DB to get flat list
+        flat_list = []
+        try:
+            import sqlalchemy
+            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+            df_f = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
+            if not df_f.empty:
+                flat_list = sorted(df_f['Flat No'].dropna().unique().tolist())
+        except:
+            pass
+            
+        selected_flat = st.selectbox("🎯 Select Flat to Calculate For", ["-- Select Flat --"] + flat_list)
+        
+        summary_container = st.container()
+            
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        if "calc_df" not in st.session_state:
+            st.session_state.calc_df = pd.DataFrame({
+                "Month": months,
+                "Base Dues": [base_dues] * 12,
+                "Payment Received": [0.0] * 12,
+            })
+            st.session_state.calc_key = 0
+            
+        # Detect flat change and auto-fill payments from DB
+        if "last_selected_flat" not in st.session_state:
+            st.session_state.last_selected_flat = "-- Select Flat --"
+            
+        if selected_flat != st.session_state.last_selected_flat:
+            st.session_state.last_selected_flat = selected_flat
+            
+            # Reset payments to 0 on swap
+            st.session_state.calc_df["Payment Received"] = 0.0
+            
+            if selected_flat != "-- Select Flat --":
+                try:
+                    import sqlalchemy
+                    engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                    df_hist = pd.read_sql(f"SELECT `Month`, `Amount` FROM payment_history WHERE `Flat Number` = '{selected_flat}'", con=engine)
+                    
+                    if not df_hist.empty:
+                        # Extract the 3 letter month abbreviation (e.g. AUG-2025 -> Aug)
+                        df_hist['Month_Short'] = df_hist['Month'].astype(str).str[:3].str.title()
+                        
+                        # Sum payments per month in case of multiple transactions
+                        monthly_totals = df_hist.groupby('Month_Short')['Amount'].sum().reset_index()
+                        
+                        for _, row in monthly_totals.iterrows():
+                            idx = st.session_state.calc_df[st.session_state.calc_df['Month'] == row['Month_Short']].index
+                            if not idx.empty:
+                                st.session_state.calc_df.loc[idx[0], 'Payment Received'] = float(row['Amount'])
+                                
+                except Exception:
+                    pass
+            
+            st.session_state.calc_key += 1
+            st.rerun()
+            
+        # Hard-sync Base Dues to the global configuration
+        if "calc_df" in st.session_state:
+            st.session_state.calc_df["Base Dues"] = base_dues
+            
+        if st.button("Reset Payments to Zero"):
+            st.session_state.calc_df["Payment Received"] = 0.0
+            st.session_state.calc_key += 1
+            st.rerun()
+            
+        st.markdown("#### 📝 Input Payments (Editable)")
+        st.info("Edit the **Payment Received** column below to simulate different scenarios. The Ledger will dynamically recalculate below.")
+        
+        edited_df = st.data_editor(
+            st.session_state.calc_df, 
+            key=f"calc_editor_{st.session_state.calc_key}",
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Month": st.column_config.Column("Month", disabled=True),
+                "Base Dues": st.column_config.NumberColumn("Base Dues (₹) - From Config", disabled=True),
+                "Payment Received": st.column_config.NumberColumn("Payment Received (₹)", min_value=0.0, step=100.0),
+            }
+        )
+        # Update session state with edited values so they persist if other tabs are clicked
+        st.session_state.calc_df = edited_df.copy()
+        
+        # Calculation Engine
+        results = []
+        forward_principal = 0.0  # Positive = Arrears (Owed to Society), Negative = Advance (Credit)
+        accumulated_penalty = 0.0 # Running total of penalties, not added to principal
+
+        for idx, row in edited_df.iterrows():
+            month = row["Month"]
+            dues = float(row["Base Dues"])
+            payment = float(row["Payment Received"])
+            
+            # Step 1: Outstanding Principal + Current Month Dues
+            total_principal_required = forward_principal + dues
+            
+            # Total amount owed including historical penalties (for display purposes)
+            total_required_display = total_principal_required + accumulated_penalty
+            
+            # Step 2: Apply Payment
+            # Rule 4: Pay off historical penalties first, then principal
+            remaining_payment = payment
+            
+            if remaining_payment > 0 and accumulated_penalty > 0:
+                if remaining_payment >= accumulated_penalty:
+                    remaining_payment -= accumulated_penalty
+                    accumulated_penalty = 0.0
+                else:
+                    accumulated_penalty -= remaining_payment
+                    remaining_payment = 0.0
+            
+            # Apply remaining payment to principal
+            principal_after_payment = total_principal_required - remaining_payment
+            
+            penalty_applied = 0.0
+            # Rule 1 & Rule 3: Penalty if principal payment not received / underpaid
+            if principal_after_payment > 0:
+                # Calculate penalty based on the unadjusted principal owed (simple interest)
+                penalty_applied = principal_after_payment * monthly_interest_rate
+                # Simple Interest: Add to accumulated penalty, NOT to principal
+                accumulated_penalty += penalty_applied
+                closing_principal = principal_after_payment
+            else:
+                # Rule 2: If overpaid, adjust in next month -> principal_after_payment is <= 0
+                closing_principal = principal_after_payment
+            
+            # The closing balance shown is the net sum of advanced principal + any unpaid penalties
+            # e.g., if advance is -1000 and penalty is 250, closing balance represents net -750 or just show them separately.
+            # To be clear, we will show Closing Principal and Total Closing Balance
+            
+            closing_balance = closing_principal + accumulated_penalty
+
+            # The closing principal is strictly dues minus base payments.
+            # Penalties exist in a completely separate bucket (accumulated_penalty).
+
+            results.append({
+                "Month": month,
+                "Opening Principal": forward_principal,
+                "Current Dues": dues,
+                "Total Principal Due": total_principal_required,
+                "Unpaid Penalties": accumulated_penalty - penalty_applied, # Historical penalties before this month's addition
+                "Amount Paid": payment,
+                "New Penalty Added": penalty_applied,
+                "Closing Principal": closing_principal,
+                "Total Closing Obligation": closing_principal + accumulated_penalty
+            })
+            
+            # Carry over to next month
+            forward_principal = closing_principal
+            
+        res_df = pd.DataFrame(results)
+        
+        # Formatting for display
+        def format_currency(val):
+            if val == 0:
+                return "₹0"
+            elif val > 0:
+                return f"₹{val:,.2f} (Due)"
+            else:
+                return f"₹{abs(val):,.2f} (Advance)"
+                
+        display_df = res_df.copy()
+        
+        # Format general currency columns 
+        for col in ["Current Dues", "Amount Paid", "New Penalty Added", "Unpaid Penalties"]:
+            display_df[col] = display_df[col].apply(lambda x: f"₹{x:,.2f}")
+            
+        # Format Principal/Obligation columns with (Due)/(Advance)
+        for col in ["Opening Principal", "Total Principal Due", "Closing Principal", "Total Closing Obligation"]:
+            display_df[col] = display_df[col].apply(format_currency)
+            
+        st.markdown(f"#### 📊 Final Computed Ledger (Simple Interest) for {selected_flat if selected_flat != '-- Select Flat --' else 'Pending Selection'}")
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # --- Final Flat Metrics ---
+        if selected_flat != "-- Select Flat --":
+            with summary_container:
+                st.markdown("---")
+                st.markdown(f"### 🎯 Year-End Summary for {selected_flat}")
+                
+                # Extract the final month's metrics directly from the calculation engine's final iteration
+                final_principal = closing_principal
+                final_penalties = accumulated_penalty
+                final_total_obligation = final_principal + final_penalties
+                
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Total Principal Outstanding", f"₹{final_principal:,.2f}" if final_principal > 0 else f"₹0.00 (Advance: ₹{abs(final_principal):,.2f})")
+                with m2:
+                    st.metric("Total Unpaid Penalty", f"₹{final_penalties:,.2f}")
+                with m3:
+                    st.metric("Final Total Obligation", f"₹{final_total_obligation:,.2f}", delta="Action Required" if final_total_obligation > 0 else "All Clear", delta_color="inverse")
+                st.markdown("---")
+
+
+# --- Upload Payments Menu ---
+elif app_mode == "📤 Upload Payments":
+    st.title("📤 Manage Payment Details")
+    st.markdown('<p class="info-text">Upload payment files and search for specific flat details.</p>', unsafe_allow_html=True)
+    
+    st.markdown("### 📥 Upload Payment File")
+    st.info("Upload an Excel file containing payment details.")
+    
+    pay_file = st.file_uploader("Upload Resident Payments (.xls / .xlsx)", type=["xls", "xlsx"], key="payment_upload")
+    
+    if pay_file is not None:
+        try:
+            with st.spinner("Processing file..."):
+                xl = pd.ExcelFile(pay_file)
+                sheet_names = [s for s in xl.sheet_names if s.strip().lower() not in ["master", "total"]]
+                
+            st.success(f"✅ File loaded successfully! Found {len(sheet_names)} payment sheets.")
+            
+            st.markdown("### 🔍 Search Payments")
+            search_flat = st.text_input("Enter Flat Number (e.g., C1-1101, A-104)", placeholder="Search for a flat...")
+            
+            if search_flat:
+                search_query = search_flat.strip().upper().replace(" ", "")
+                
+                # Simple exact match or contains match on sheet names
+                matching_sheets = [s for s in sheet_names if search_query in s.strip().upper().replace(" ", "")]
+                
+                if matching_sheets:
+                    st.write(f"Found {len(matching_sheets)} matching flat(s):")
+                    
+                    # --- Parse all matching sheets first ---
+                    parsed_sheets = {}  # sheet_name -> final_df
+                    for sheet in matching_sheets:
+                        try:
+                            df_sheet = pd.read_excel(xl, sheet_name=sheet, header=None)
+                            
+                            header_idx = None
+                            start_col_idx = None
+                            
+                            def is_start_col(c):
+                                cell_str = str(c).strip().lower()
+                                return cell_str.startswith('year') or cell_str == 'month' or cell_str.startswith('column')
+                            
+                            for i, row in df_sheet.iterrows():
+                                row_str = row.astype(str).str.lower().tolist()
+                                year_month_present = any(is_start_col(cell) for cell in row_str)
+                                amount_present = any(str(cell).strip().lower() == 'amount' for cell in row_str)
+                                if year_month_present and amount_present:
+                                    header_idx = i
+                                    for j, cell in enumerate(row_str):
+                                        if is_start_col(cell):
+                                            start_col_idx = j
+                                            break
+                                    break
+                                    
+                            if header_idx is not None and start_col_idx is not None:
+                                clean_df = df_sheet.iloc[header_idx + 1:, start_col_idx : start_col_idx + 9].copy()
+                                clean_df.columns = df_sheet.iloc[header_idx, start_col_idx : start_col_idx + 9].astype(str).str.strip()
+                                
+                                clean_headers = ["Month", "Last Month Interest", "Outstanding", "Monthly Dues", "Date", "Narration", "Amount", "Balance", "Interest"]
+                                if len(clean_df.columns) == 9:
+                                    clean_df.columns = clean_headers
+                                else:
+                                    from collections import Counter
+                                    counts = Counter()
+                                    new_cols = []
+                                    for col in clean_df.columns:
+                                        new_cols.append(f"{col}_{counts[col]}" if counts[col] > 0 else col)
+                                        counts[col] += 1
+                                    clean_df.columns = new_cols
+                                
+                                clean_df = clean_df.dropna(how='all')
+                                if "Date" in clean_df.columns:
+                                    clean_df["Date"] = pd.to_datetime(clean_df["Date"], errors='coerce').dt.strftime('%Y-%m-%d').fillna("")
+                                if "Amount" in clean_df.columns:
+                                    clean_df["Amount"] = pd.to_numeric(clean_df["Amount"], errors='coerce').fillna(0)
+                                
+                                # Fill blank Month from Date (e.g. "2023-04-30" → "Apr")
+                                if "Month" in clean_df.columns and "Date" in clean_df.columns:
+                                    def derive_month(row):
+                                        val = str(row.get("Month", "")).strip().lower()
+                                        if val in ["", "nan", "none"]:
+                                            date_val = str(row.get("Date", "")).strip()
+                                            try:
+                                                return pd.to_datetime(date_val).strftime('%b')
+                                            except:
+                                                return ""
+                                        return row["Month"]
+                                    clean_df["Month"] = clean_df.apply(derive_month, axis=1)
+
+                                    
+                                keep_cols = [c for c in ["Month", "Date", "Narration", "Amount"] if c in clean_df.columns]
+                                final_df = clean_df[keep_cols].copy()
+                                final_df.insert(0, "Flat Number", sheet)
+                                if "Amount" in final_df.columns:
+                                    final_df = final_df[final_df["Amount"] > 0].reset_index(drop=True)
+                                parsed_sheets[sheet] = final_df
+                        except Exception as sheet_err:
+                            st.error(f"Could not parse flat {sheet}: {sheet_err}")
+                    
+                    # --- Single Approve All checkbox above all tables ---
+                    approve_all = st.checkbox("Approve All Payments", key="approve_all_global")
+                    
+                    # --- Render each sheet with per-row Approved checkboxes ---
+                    all_edited = {}
+                    for sheet, final_df in parsed_sheets.items():
+                        st.markdown(f"#### 📄 Data for Flat: **{sheet}**")
+                        final_df.insert(0, "Approved", approve_all)  # pre-fill based on master checkbox
+                        edited_df = st.data_editor(
+                            final_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Approved": st.column_config.CheckboxColumn(
+                                    "Approved",
+                                    help="Tick to approve this payment. Use the header checkbox to approve all."
+                                ),
+                            },
+                            key=f"pay_editor_{sheet}"
+                        )
+                        approved_count = int(edited_df["Approved"].sum())
+                        st.markdown(
+                            f"<span style='color:#00f0ff;font-size:0.9rem;'>🔢 {approved_count} of {len(edited_df)} payment(s) selected</span>",
+                            unsafe_allow_html=True
+                        )
+                        
+                        # --- Show duplicate transactions (already in DB) ---
+                        try:
+                            import sqlalchemy as _sa
+                            _engine = _sa.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                            with _engine.connect() as _conn:
+                                # Check which rows from this sheet already exist in DB
+                                dup_rows = []
+                                for _, row in edited_df.iterrows():
+                                    exists = _conn.execute(_sa.text("""
+                                        SELECT 1 FROM payment_history
+                                        WHERE `Flat Number`=:flat AND `Month`=:month AND `Date`=:date AND `Amount`=:amount
+                                        LIMIT 1
+                                    """), {
+                                        "flat": row.get("Flat Number", ""),
+                                        "month": row.get("Month", ""),
+                                        "date": str(row.get("Date", "")),
+                                        "amount": float(row.get("Amount", 0))
+                                    }).fetchone()
+                                    if exists:
+                                        dup_rows.append(row.drop(labels=["Approved"]))
+                                        
+                                if dup_rows:
+                                    dup_df = pd.DataFrame(dup_rows).reset_index(drop=True)
+                                    st.warning(f"⚠️ {len(dup_rows)} transaction(s) already exist in DB (will be skipped on save):")
+                                    st.dataframe(dup_df, use_container_width=True, hide_index=True)
+                        except Exception:
+                            pass  # silently skip if DB not reachable
+                        
+                        all_edited[sheet] = edited_df
+
+                    
+                    # --- Save button: sends only approved rows ---
+                    st.markdown("---")
+                    if st.button("💾 Save Approved Payments to Database", type="primary"):
+                        try:
+                            import sqlalchemy
+                            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                            rows_to_save = []
+                            for sheet, edited_df in all_edited.items():
+                                approved_rows = edited_df[edited_df["Approved"] == True].drop(columns=["Approved"])
+                                rows_to_save.append(approved_rows)
+                            combined = pd.concat(rows_to_save, ignore_index=True) if rows_to_save else pd.DataFrame()
+                            if len(combined) > 0:
+                                with st.spinner("Saving to MySQL..."):
+                                    
+                                    # Extract UTR/reference from Narration
+                                    # Priority: pure numeric tokens (10+ digits) like IMPS UTR
+                                    # Fallback: last alphanumeric token that contains digits (NEFT UTR like AXMB231969016421)
+                                    def extract_utr(narration):
+                                        import re
+                                        if not narration or str(narration).strip() in ["", "nan"]:
+                                            return None
+                                        s = str(narration).upper()
+                                        # 1st priority: pure numeric sequence of 10+ digits (IMPS UTR)
+                                        numeric_tokens = re.findall(r'\b\d{10,}\b', s)
+                                        if numeric_tokens:
+                                            return numeric_tokens[0]
+                                        # 2nd priority: alphanumeric token containing digits (NEFT-style UTR)
+                                        mixed_tokens = [t for t in re.findall(r'[A-Z0-9]{8,}', s) if any(c.isdigit() for c in t)]
+                                        if mixed_tokens:
+                                            return mixed_tokens[-1]
+                                        return None
+                                    
+                                    combined["narration_ref"] = combined.get("Narration", pd.Series([""] * len(combined))).apply(extract_utr)
+                                    
+                                    with engine.connect() as conn:
+                                        # Composite unique key: (Flat Number, Month, Date, Amount)
+                                        # narration_ref stored for reference but NOT used as unique key
+                                        conn.execute(sqlalchemy.text("""
+                                            CREATE TABLE IF NOT EXISTS payment_history (
+                                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                                `Flat Number` VARCHAR(50),
+                                                `Month` VARCHAR(20),
+                                                `Date` VARCHAR(20),
+                                                `Narration` TEXT,
+                                                `Amount` DECIMAL(12,2),
+                                                `narration_ref` VARCHAR(100),
+                                                UNIQUE KEY uq_payment (`Flat Number`, `Month`, `Date`, `Amount`)
+                                            )
+                                        """))
+                                        conn.commit()
+                                        
+                                        # Insert row by row using INSERT IGNORE to skip duplicates
+                                        inserted = 0
+                                        skipped_rows = []
+                                        for _, row in combined.iterrows():
+                                            try:
+                                                result = conn.execute(sqlalchemy.text("""
+                                                    INSERT IGNORE INTO payment_history 
+                                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`)
+                                                    VALUES (:flat, :month, :date, :narration, :amount, :ref)
+                                                """), {
+                                                    "flat": row.get("Flat Number", ""),
+                                                    "month": row.get("Month", ""),
+                                                    "date": str(row.get("Date", "")),
+                                                    "narration": row.get("Narration", ""),
+                                                    "amount": float(row.get("Amount", 0)),
+                                                    "ref": row.get("narration_ref", None)
+                                                })
+                                                if result.rowcount > 0:
+                                                    inserted += 1
+                                                else:
+                                                    skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
+                                            except Exception:
+                                                skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
+                                        conn.commit()
+                                
+                                skipped = len(skipped_rows)
+                                st.success(f"✅ {inserted} payment(s) saved. {skipped} duplicate(s) skipped.")
+                                if skipped_rows:
+                                    st.warning(f"⚠️ The following {skipped} transaction(s) were skipped (already in DB):")
+                                    skipped_df = pd.DataFrame(skipped_rows).reset_index(drop=True)
+                                    st.dataframe(skipped_df, use_container_width=True, hide_index=True)
+
+                            else:
+                                st.warning("⚠️ No payments selected. Tick at least one row before saving.")
+                        except Exception as db_err:
+                            st.error(f"❌ Failed to save to database: {db_err}")
+                    
+        except Exception as e:
+            st.error(f"Error reading uploaded file: {e}")
+
+
+# --- Settings Menu ---
+elif app_mode == "⚙️ Settings":
+    st.title("⚙️ Global Society Settings")
+    st.markdown('<p class="info-text">Configure global parameters like default maintenance fees and penalty grace periods.</p>', unsafe_allow_html=True)
+    
+    current_settings = load_settings()
+    
+    st.markdown("### 🧮 Maintenance Defaults")
+    with st.form("settings_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_base = st.number_input("Base Monthly Maintenance (₹)", min_value=0.0, value=float(current_settings["base_maintenance"]), step=100.0)
+            new_grace = st.number_input("Penalty Applied After Day of Month", min_value=1, max_value=31, value=int(current_settings["grace_period_day"]), help="e.g., If set to 10, penalties apply after the 10th of the month.")
+        with col2:
+            new_penalty_apr = st.number_input("Late Payment Annual Interest Rate (%)", min_value=0.0, value=float(current_settings.get("penalty_apr", 18.0)), step=1.0, help="Annual Percentage Rate. Will divide by 12 for monthly calculation.")
+        
+        submitted = st.form_submit_button("💾 Save Settings", type="primary")
+        if submitted:
+            new_settings = {
+                "base_maintenance": new_base,
+                "penalty_apr": new_penalty_apr,
+                "grace_period_day": new_grace
+            }
+            save_settings(new_settings)
+            st.success("✅ Society settings updated successfully!")
+
+    # --- Database Connection Settings ---
     st.markdown("---")
-    st.markdown("#### 🏦 Direct Bank Deposits (Account Statement)")
-    if len(filtered_df_stmt) > 0:
-        st.dataframe(filtered_df_stmt, use_container_width=True, hide_index=True, height=350)
-    else:
-        st.info("No direct account statement records found for this flat.")
+    st.markdown("### 🗄️ Database Connection")
+    st.markdown('<p class="info-text">Configure and test your MySQL database connection.</p>', unsafe_allow_html=True)
+
+    with st.form("db_settings_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_db_host = st.text_input("Host", value=db_host)
+            new_db_user = st.text_input("Username", value=db_user)
+            new_db_name = st.text_input("Database Name", value=db_name)
+        with col2:
+            new_db_port = st.text_input("Port", value=str(db_port))
+            new_db_pass = st.text_input("Password", value=db_pass, type="password")
+
+        col_save, col_test = st.columns(2)
+        with col_save:
+            save_db_btn = st.form_submit_button("💾 Save DB Config", type="primary", use_container_width=True)
+        with col_test:
+            test_db_btn = st.form_submit_button("🔌 Test Connection", use_container_width=True)
+
+    if save_db_btn:
+        save_db_config({"host": new_db_host, "port": new_db_port, "user": new_db_user, "password": new_db_pass, "database": new_db_name})
+        st.success("✅ DB config saved! Restart the app to apply new connection settings.")
+
+    if test_db_btn:
+        if not new_db_port.strip().isdigit():
+            st.error("⚠️ Please enter a valid Port number.")
+        else:
+            try:
+                import sqlalchemy
+                test_engine = sqlalchemy.create_engine(f"mysql+pymysql://{new_db_user}:{new_db_pass}@{new_db_host}:{new_db_port}/{new_db_name}")
+                with test_engine.connect() as conn:
+                    host_result = conn.execute(sqlalchemy.text("SELECT @@hostname, @@version")).fetchone()
+                    tables_result = conn.execute(sqlalchemy.text("SHOW TABLES")).fetchall()
+                    tables = [row[0] for row in tables_result]
+                st.success(f"✅ Connected to **{new_db_host}:{new_db_port}/{new_db_name}**")
+                st.caption(f"🖥️ Server: `{host_result[0]}` | MySQL v{host_result[1]}")
+                st.caption(f"📋 Tables: `{'`, `'.join(tables)}`" if tables else "📋 No tables found yet.")
+            except Exception as e:
+                st.error(f"❌ Connection failed: {e}")
+
+    # --- Sync to MySQL ---
+    st.markdown("### 🔄 Sync Statement Data to MySQL")
+    if st.button("🔄 Sync to MySQL", use_container_width=True):
+        if "df_stmt" not in st.session_state or st.session_state.df_stmt is None or len(st.session_state.df_stmt) == 0:
+            st.error("⚠️ No Account Statement data loaded to sync.")
+        elif "df_rec" not in st.session_state or st.session_state.df_rec is None or len(st.session_state.df_rec) == 0:
+            st.error("⚠️ No Bank Reconciliation data loaded to sync.")
+        else:
+            try:
+                import sqlalchemy, re
+                engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                def sanitize_col(col_name):
+                    name = str(col_name).strip()
+                    if len(name) > 60: name = name[:60]
+                    name = re.sub(r'[^a-zA-Z0-9]', '_', name)
+                    return name.strip('_')
+                with st.spinner("Syncing data to MySQL..."):
+                    sql_df_stmt = st.session_state.df_stmt.copy()
+                    sql_df_rec = st.session_state.df_rec.copy()
+                    sql_df_stmt.columns = [sanitize_col(c) for c in sql_df_stmt.columns]
+                    sql_df_rec.columns = [sanitize_col(c) for c in sql_df_rec.columns]
+                    sql_df_stmt.to_sql(name="account_statement", con=engine, if_exists="replace", index=False)
+                    sql_df_rec.to_sql(name="bank_reconciliation", con=engine, if_exists="replace", index=False)
+                st.success(f"✅ Successfully synced tables to `{db_name}`.")
+            except Exception as e:
+                st.error(f"❌ Database Error: {e}")
+
 
 # --- Footer ---
 st.markdown("---")

@@ -1,0 +1,40 @@
+
+--- Inspecting: d:\BhumiDoc\Flat Resident List-c wing.xlsx ---
+Columns: ['Unnamed: 0', 'Unnamed: 1', 'Unnamed: 2', 'Unnamed: 3', 'Unnamed: 4', 'Unnamed: 5']
+First 15 rows:
+   Unnamed: 0 Unnamed: 1       Unnamed: 2     Unnamed: 3 Unnamed: 4  Unnamed: 5
+0         NaN        NaN              NaN            NaN        NaN         NaN
+1         NaN        NaN              NaN            NaN        NaN         NaN
+2     Sr. No.   Flat No.  Flat Owner Name  Mobile Number        NaN         NaN
+3         NaN        NaN              NaN            NaN        NaN         NaN
+4         NaN        NaN              NaN            NaN        NaN         NaN
+5         NaN        NaN              NaN            NaN        NaN         NaN
+6         NaN        NaN              NaN            NaN        NaN         NaN
+7         NaN        NaN              NaN            NaN        NaN         NaN
+8         NaN        NaN              NaN            NaN        NaN         NaN
+9         NaN        NaN              NaN            NaN        NaN         NaN
+10        NaN        NaN              NaN            NaN        NaN         NaN
+11        NaN        NaN              NaN            NaN        NaN         NaN
+12        NaN        NaN              NaN            NaN        NaN         NaN
+13        NaN        NaN              NaN            NaN        NaN         NaN
+14        NaN        NaN              NaN            NaN        NaN         NaN
+
+--- Inspecting: d:\BhumiDoc\Flat Resident List.xlsx ---
+Columns: ['Unnamed: 0', 'Unnamed: 1', 'Unnamed: 2', 'Unnamed: 3']
+First 15 rows:
+   Unnamed: 0 Unnamed: 1                        Unnamed: 2     Unnamed: 3
+0         NaN        NaN                               NaN            NaN
+1         NaN        NaN                               NaN            NaN
+2     Sr. No.   Flat No.                   Flat Owner Name  Mobile Number
+3           1     C1-101        Mr. Anant Sanjayrao Hendre     8600151112
+4           2     C1-104         Mr. Rahul Laxman Ghanokar     9975408088
+5           3     C1-201         Mr. Dhiraj Vishnu Kharche            NaN
+6           4     C1-202           Mr. Aditya Dilip Gogate            NaN
+7           5     C1-203         Mrs. Tillotama Vijay Supe            NaN
+8           6     C1-204            Mr. Amol Dattu Phapale     9890506890
+9           7     C1-301         Mr. Satish Navnath Rahane     9527334638
+10          8     C1-302   Mrs. Pradnya Prakash Hitnalikar            NaN
+11          9     C1-303       Mr. Ganesh Vasudeo Narkhede     9922910745
+12         10     C1-304       Mr. Bhushan Vasantrao Jalit     9922418892
+13         11     C1-401      Mr. Pankaj Radhakrishna Teli     9975451118
+14         12     C1-402  Mrs. Indumati Dnyanoba Gonshetti            NaN
