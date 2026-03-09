@@ -7,3 +7,10 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# Settings file with secrets — never commit this
+society_settings.json
+
+# Environment files
+.env
+.env.*

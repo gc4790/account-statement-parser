@@ -8,8 +8,11 @@ SETTINGS_FILE = "society_settings.json"
 def load_settings():
     default_settings = {
         "base_maintenance": 2500.0,
-        "penalty_apr": 18.0, # Annual Percentage Rate (18% == 1.5% monthly)
-        "grace_period_day": 10
+        "penalty_apr": 18.0,
+        "grace_period_day": 10,
+        "gmail_sender_email": "bhumisilveriiocwing@gmail.com",
+        "brevo_login": "",
+        "brevo_smtp_key": ""
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -39,6 +42,97 @@ def load_db_config():
 def save_db_config(cfg):
     with open(DB_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=4)
+
+
+def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_forward, brevo_login, brevo_smtp_key, from_email="bhumisilveriiocwing@gmail.com"):
+    """Sends an HTML payment receipt via Brevo SMTP relay."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    FROM = from_email
+
+    # Build month-wise table rows
+    rows_html = ""
+    for _, r in res_df.iterrows():
+        rows_html += f"""
+        <tr>
+            <td style='padding:8px 12px;border-bottom:1px solid #e0e0e0;'>{r['Month']}</td>
+            <td style='padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:right;'>&#8377;{float(r['Current Dues']):,.2f}</td>
+            <td style='padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:right;'>&#8377;{float(r['Amount Paid']):,.2f}</td>
+            <td style='padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:right;'>&#8377;{float(r['New Penalty Added']):,.2f}</td>
+            <td style='padding:8px 12px;border-bottom:1px solid #e0e0e0;text-align:right;'>&#8377;{float(r['Closing Principal']):,.2f}</td>
+        </tr>"""
+
+    total_paid = res_df['Amount Paid'].sum()
+    final_principal = res_df.iloc[-1]['Closing Principal']
+    final_penalty = res_df['New Penalty Added'].sum()
+
+    html = f"""
+    <html><body style='font-family:Arial,sans-serif;color:#222;'>
+    <div style='max-width:650px;margin:auto;border:1px solid #ddd;border-radius:10px;overflow:hidden;'>
+        <div style='background:#1a1e2b;padding:20px 30px;'>
+            <h2 style='color:#fca311;margin:0;'>Bhumi Silver II — OC Wing</h2>
+            <p style='color:#aaa;margin:4px 0 0;'>Maintenance Payment Receipt</p>
+        </div>
+        <div style='padding:24px 30px;'>
+            <table style='width:100%;margin-bottom:16px;'>
+                <tr><td style='color:#666;'>Flat No.</td><td><strong>{flat_no}</strong></td></tr>
+                <tr><td style='color:#666;'>Owner</td><td><strong>{owner_name}</strong></td></tr>
+                <tr><td style='color:#666;'>Financial Year</td><td><strong>{fy_label}</strong></td></tr>
+                <tr><td style='color:#666;'>Opening Outstanding</td><td><strong>&#8377;{carry_forward:,.2f}</strong></td></tr>
+            </table>
+            <h3 style='color:#1a1e2b;border-bottom:2px solid #fca311;padding-bottom:6px;'>Month-wise Summary</h3>
+            <table style='width:100%;border-collapse:collapse;font-size:0.9rem;'>
+                <thead style='background:#f5f5f5;'>
+                    <tr>
+                        <th style='padding:8px 12px;text-align:left;'>Month</th>
+                        <th style='padding:8px 12px;text-align:right;'>Dues</th>
+                        <th style='padding:8px 12px;text-align:right;'>Paid</th>
+                        <th style='padding:8px 12px;text-align:right;'>Penalty</th>
+                        <th style='padding:8px 12px;text-align:right;'>Closing</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+            <table style='width:100%;margin-top:20px;background:#f9f9f9;border-radius:8px;padding:16px;'>
+                <tr><td style='padding:6px;color:#555;'>Total Paid</td><td style='text-align:right;'><strong>&#8377;{total_paid:,.2f}</strong></td></tr>
+                <tr><td style='padding:6px;color:#c0392b;'>Total Penalty</td><td style='text-align:right;color:#c0392b;'><strong>&#8377;{final_penalty:,.2f}</strong></td></tr>
+                <tr><td style='padding:6px;color:#555;'>Outstanding Balance</td><td style='text-align:right;'><strong>&#8377;{final_principal:,.2f}</strong></td></tr>
+            </table>
+        </div>
+        <div style='background:#f5f5f5;padding:14px 30px;font-size:0.8rem;color:#888;text-align:center;'>
+            This is an auto-generated receipt. For queries contact the society office.
+        </div>
+    </div>
+    </body></html>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Maintenance Receipt — Flat {flat_no} ({fy_label})"
+    msg["From"] = FROM
+    msg["To"] = to_email
+    msg.attach(MIMEText(html, "html"))
+
+    # Brevo SMTP — try new hostname first, fall back to legacy sendinblue hostname
+    _brevo_login_clean = brevo_login.strip()
+    _brevo_key_clean = brevo_smtp_key.strip()
+    _sent = False
+    _last_err = None
+    for _host in ["smtp-relay.brevo.com", "smtp-relay.sendinblue.com"]:
+        try:
+            with smtplib.SMTP(_host, 587, timeout=15) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(_brevo_login_clean, _brevo_key_clean)
+                server.sendmail(FROM, to_email, msg.as_string())
+            _sent = True
+            break
+        except Exception as _e:
+            _last_err = _e
+    if not _sent:
+        raise Exception(f"{_last_err}")
+
 
 # --- Page Config & Styling ---
 st.set_page_config(
@@ -222,12 +316,47 @@ if app_mode == "🔍 Transaction Search":
 elif app_mode == "🏢 Flat Management":
     st.title("🏢 Flat Account Management")
     st.markdown('<p class="info-text">View your reconciled financial ledgers and manage the resident database below.</p>', unsafe_allow_html=True)
-    
-    tab_search, tab_upload, tab_calc = st.tabs(["🔍 Search Flat Details", "📥 Bulk Upload Tenant/Owner DB", "🧮 Maintenance Calculator"])
-    
-    with tab_search:
-        search_query = st.text_input("🔍 Search Database", placeholder="Type Flat No, Owner, Tenant name or Contact...")
 
+    # --- Single shared flat selector ABOVE tabs ---
+    _flat_list_shared = []
+    try:
+        import sqlalchemy as _sqla_shared
+        _eng_shared = _sqla_shared.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+        _df_shared = pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_shared)
+        if not _df_shared.empty:
+            _flat_list_shared = sorted(_df_shared['Flat No'].dropna().unique().tolist())
+    except:
+        pass
+    selected_flat = st.selectbox("🏠 Select Flat", ["-- Select Flat --"] + _flat_list_shared, key="shared_flat_selector")
+
+    tab_search, tab_upload, tab_calc = st.tabs(["🔍 Search Flat Details", "📥 Bulk Upload Tenant/Owner DB", "🧮 Maintenance Calculator"])
+
+
+    with tab_search:
+        if selected_flat != "-- Select Flat --":
+            try:
+                import sqlalchemy as _sqla_srch
+                _eng_srch = _sqla_srch.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                _df_srch = pd.read_sql(
+                    f"SELECT * FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
+                    con=_eng_srch,
+                )
+                if not _df_srch.empty:
+                    info = _df_srch.iloc[0]
+                    flat_no = info.get("Flat No", "N/A")
+                    owner = info.get("Owner Name", "N/A")
+                    is_rented = info.get("Rented Status", "No")
+                    tenant = info.get("Tenant Name", "N/A") if is_rented == "Yes" else "N/A"
+                    contact = info.get("Contact Number", "N/A")
+                    f_type = info.get("Flat Type", "N/A")
+                    f_area = info.get("Area (sq ft)", "N/A")
+                    st.info(f"### 🚪 Flat {flat_no}\n**👤 Owner:** {owner} &nbsp;&nbsp;|&nbsp;&nbsp; **📞 Contact:** {contact} &nbsp;&nbsp;|&nbsp;&nbsp; **🏠 Type:** {f_type} ({f_area} sq ft)\n\n**🔑 Rented:** {is_rented} &nbsp;&nbsp;|&nbsp;&nbsp; **🧑\u200d🤝\u200d🧑 Tenant:** {tenant}")
+                else:
+                    st.warning("No details found for this flat.")
+            except Exception as e:
+                st.error(f"Search error: {e}")
+        else:
+            st.info("👆 Select a flat from the dropdown above to view its details.")
 
 # --- Apply Date Filter First ---
 if len(date_filter) == 2 and df_stmt is not None and df_rec is not None:
@@ -493,37 +622,7 @@ if app_mode == "🔍 Transaction Search":
 elif app_mode == "🏢 Flat Management":
     st.markdown("---")
     
-    with tab_search:
-        if search_query:
-            try:
-                import sqlalchemy
-                engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
-                
-                query = f"""
-                SELECT * FROM flat_details 
-                WHERE `Flat No` LIKE '%%{search_query}%%' 
-                   OR `Owner Name` LIKE '%%{search_query}%%' 
-                   OR `Tenant Name` LIKE '%%{search_query}%%' 
-                   OR CAST(`Contact Number` AS CHAR) LIKE '%%{search_query}%%'
-                """
-                df_flat = pd.read_sql(query, con=engine)
-                
-                if not df_flat.empty:
-                    st.success(f"✅ Found {len(df_flat)} matching resident(s)")
-                    for _, info in df_flat.iterrows():
-                        flat_no = info.get("Flat No", "N/A")
-                        owner = info.get("Owner Name", "N/A")
-                        is_rented = info.get("Rented Status", "No")
-                        tenant = info.get("Tenant Name", "N/A") if is_rented == "Yes" else "N/A"
-                        contact = info.get("Contact Number", "N/A")
-                        f_type = info.get("Flat Type", "N/A")
-                        f_area = info.get("Area (sq ft)", "N/A")
-                        
-                        st.info(f"### 🚪 Flat {flat_no}\n**👤 Owner:** {owner} &nbsp;&nbsp;|&nbsp;&nbsp; **📞 Contact:** {contact} &nbsp;&nbsp;|&nbsp;&nbsp; **🏠 Type:** {f_type} ({f_area} sq ft)\n\n**🔑 Rented:** {is_rented} &nbsp;&nbsp;|&nbsp;&nbsp; **🧑‍🤝‍🧑 Tenant:** {tenant}")
-                else:
-                    st.warning("⚠️ No matching flats found in the database. Try adjusting your search term.")
-            except Exception as e:
-                st.error(f"Search error: {e}")
+
 
     with tab_upload:
         st.markdown("### 🏠 Flat & Tenant Database")
@@ -628,47 +727,47 @@ elif app_mode == "🏢 Flat Management":
         monthly_interest_rate = penalty_apr / 12 / 100
         
         st.info(f"⚙️ **Active Global Policy:** {penalty_apr}% Annual Penalty applied to unpaid dues after day {grace_day} of each month.")
-        
-        # Connect to DB to get flat list
-        flat_list = []
-        try:
-            import sqlalchemy
-            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
-            df_f = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
-            if not df_f.empty:
-                flat_list = sorted(df_f['Flat No'].dropna().unique().tolist())
-        except:
-            pass
-            
-        selected_flat = st.selectbox("🎯 Select Flat to Calculate For", ["-- Select Flat --"] + flat_list)
-        
+        # selected_flat is the shared selector defined above the tabs
+        if selected_flat == "-- Select Flat --":
+            st.info("👆 Select a flat from the dropdown above to view the maintenance ledger.")
+            st.stop()
+
         # --- Financial Year selector (Indian FY: Apr YY to Mar YY+1) ---
         current_cal_year = 2026
         fy_start_options = list(range(2023, current_cal_year + 1))
         fy_labels = [f"{y}-{str(y+1)[-2:]}" for y in fy_start_options]
-        default_fy_idx = 0  # Default to 2023-24 (earliest records)
-        selected_fy_label = st.selectbox("📅 Select Financial Year", fy_labels, index=default_fy_idx)
-        selected_year = fy_start_options[fy_labels.index(selected_fy_label)]  # start year of FY
+        all_fy_options = ["All Years"] + fy_labels
+        default_fy_idx = 1  # Default to 2023-24 (index 1 since All Years is index 0)
+        selected_fy_label = st.selectbox("📅 Select Financial Year", all_fy_options, index=default_fy_idx)
+        all_years_mode = selected_fy_label == "All Years"
+        selected_year = fy_start_options[fy_labels.index(selected_fy_label)] if not all_years_mode else fy_start_options[0]
 
         summary_container = st.container()
 
-        # FY 2023-24: start from Apr 2023, no Jan-Mar (records start from Apr 2023)
-        # All other FYs: full Indian FY (Apr–Mar)
-        if selected_year == 2023:
-            fy_months = [
-                ("Apr", selected_year), ("May", selected_year), ("Jun", selected_year),
-                ("Jul", selected_year), ("Aug", selected_year), ("Sep", selected_year),
-                ("Oct", selected_year), ("Nov", selected_year), ("Dec", selected_year),
-            ]
+        # Build month list helper — all FYs are Apr–Mar (Indian FY)
+        # FY 2023-24 starts from Apr 2023 naturally; Jan/Feb/Mar 2024 are valid tail months
+        def build_fy_months(yr):
+            return ([(m, yr) for m in ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]] +
+                    [(m, yr+1) for m in ["Jan","Feb","Mar"]])
+
+        if all_years_mode:
+            fy_months = []
+            for yr in fy_start_options:
+                fy_months += build_fy_months(yr)
         else:
-            fy_months = [
-                ("Apr", selected_year), ("May", selected_year), ("Jun", selected_year),
-                ("Jul", selected_year), ("Aug", selected_year), ("Sep", selected_year),
-                ("Oct", selected_year), ("Nov", selected_year), ("Dec", selected_year),
-                ("Jan", selected_year + 1), ("Feb", selected_year + 1), ("Mar", selected_year + 1),
-            ]
+            fy_months = build_fy_months(selected_year)
+
+        # Trim months beyond the current month (never show future months)
+        _now = pd.Timestamp.now()
+        _month_abbrs = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        fy_months = [
+            (m, y) for m, y in fy_months
+            if pd.Timestamp(year=y, month=_month_abbrs.index(m)+1, day=1) <= _now.replace(day=1)
+        ]
+
         months_with_year = [f"{m} {y}" for m, y in fy_months]
         num_months = len(fy_months)
+
 
         if "calc_df" not in st.session_state:
             st.session_state.calc_df = pd.DataFrame({
@@ -678,40 +777,37 @@ elif app_mode == "🏢 Flat Management":
             })
             st.session_state.calc_key = 0
             st.session_state.calc_year = selected_year
-            
+            st.session_state.calc_all_years = all_years_mode
+
         # Detect flat or year change and auto-fill payments from DB
         if "last_selected_flat" not in st.session_state:
             st.session_state.last_selected_flat = "-- Select Flat --"
         if "calc_year" not in st.session_state:
             st.session_state.calc_year = selected_year
-            
+        if "calc_all_years" not in st.session_state:
+            st.session_state.calc_all_years = all_years_mode
+
         flat_changed = selected_flat != st.session_state.last_selected_flat
-        year_changed  = selected_year != st.session_state.calc_year
+        year_changed  = selected_year != st.session_state.calc_year or all_years_mode != st.session_state.calc_all_years
 
         if flat_changed or year_changed:
             st.session_state.last_selected_flat = selected_flat
             st.session_state.calc_year = selected_year
+            st.session_state.calc_all_years = all_years_mode
 
-            # Clear the carry-forward widget state so it re-reads fresh value from DB
-            # (Streamlit caches number_input values in session_state by key; must delete to reset)
+            # Clear stale carry-forward widget state
             old_cf_key = f"cf_input_{selected_flat}_{selected_year}"
             if old_cf_key in st.session_state:
                 del st.session_state[old_cf_key]
 
-            # Rebuild month list based on year
-            if selected_year == 2023:
-                fy_months = [
-                    ("Apr", selected_year), ("May", selected_year), ("Jun", selected_year),
-                    ("Jul", selected_year), ("Aug", selected_year), ("Sep", selected_year),
-                    ("Oct", selected_year), ("Nov", selected_year), ("Dec", selected_year),
-                ]
+            # Rebuild month list
+            if all_years_mode:
+                fy_months = []
+                for yr in fy_start_options:
+                    fy_months += build_fy_months(yr)
             else:
-                fy_months = [
-                    ("Apr", selected_year), ("May", selected_year), ("Jun", selected_year),
-                    ("Jul", selected_year), ("Aug", selected_year), ("Sep", selected_year),
-                    ("Oct", selected_year), ("Nov", selected_year), ("Dec", selected_year),
-                    ("Jan", selected_year + 1), ("Feb", selected_year + 1), ("Mar", selected_year + 1),
-                ]
+                fy_months = build_fy_months(selected_year)
+
             months_with_year = [f"{m} {y}" for m, y in fy_months]
             num_months = len(fy_months)
             st.session_state.calc_df = pd.DataFrame({
@@ -719,6 +815,7 @@ elif app_mode == "🏢 Flat Management":
                 "Base Dues": [base_dues] * num_months,
                 "Payment Received": [0.0] * num_months,
             })
+
             
             if selected_flat != "-- Select Flat --":
                 try:
@@ -738,17 +835,18 @@ elif app_mode == "🏢 Flat Management":
                         # Parse the Date column (most reliable source) to derive year + month
                         df_hist['_parsed_date'] = pd.to_datetime(df_hist['Date'], errors='coerce')
 
-                        # Filter to the Indian FY date range: Apr start_year → Mar start_year+1
-                        fy_start_dt = pd.Timestamp(year=selected_year, month=4, day=1)
-                        fy_end_dt   = pd.Timestamp(year=selected_year + 1, month=3, day=31)
-                        df_hist = df_hist[
-                            (df_hist['_parsed_date'] >= fy_start_dt) &
-                            (df_hist['_parsed_date'] <= fy_end_dt)
-                        ].copy()
+                        # Filter to FY date range only if not showing all years
+                        if not all_years_mode:
+                            fy_start_dt = pd.Timestamp(year=selected_year, month=4, day=1)
+                            fy_end_dt   = pd.Timestamp(year=selected_year + 1, month=3, day=31)
+                            df_hist = df_hist[
+                                (df_hist['_parsed_date'] >= fy_start_dt) &
+                                (df_hist['_parsed_date'] <= fy_end_dt)
+                            ].copy()
 
-                        # Derive 3-letter month abbreviation directly from the Date column
-                        # This is far more reliable than parsing the inconsistent 'Month' text field
+                        # Derive month abbreviation and year from the Date column
                         df_hist['Month_Short'] = df_hist['_parsed_date'].dt.strftime('%b')
+                        df_hist['Year_Num'] = df_hist['_parsed_date'].dt.year
 
                         # For rows where Date is missing/invalid, fall back to the Month text field
                         def parse_month_abbrev_fallback(val):
@@ -768,14 +866,15 @@ elif app_mode == "🏢 Flat Management":
                         # Ensure Amount is numeric
                         df_hist['Amount'] = pd.to_numeric(df_hist['Amount'], errors='coerce').fillna(0)
 
-                        # Sum amounts per month and map to calc_df rows
-                        monthly_totals = df_hist.groupby('Month_Short')['Amount'].sum().reset_index()
+                        # Sum amounts per (Month, Year) and map to calc_df rows
+                        monthly_totals = df_hist.groupby(['Month_Short', 'Year_Num'])['Amount'].sum().reset_index()
 
                         for _, row in monthly_totals.iterrows():
-                            label = f"{row['Month_Short']} {selected_year}"
+                            label = f"{row['Month_Short']} {int(row['Year_Num'])}"
                             idx = st.session_state.calc_df[st.session_state.calc_df['Month'] == label].index
                             if not idx.empty:
                                 st.session_state.calc_df.loc[idx[0], 'Payment Received'] = float(row['Amount'])
+
 
                 except Exception:
                     pass
@@ -809,7 +908,9 @@ elif app_mode == "🏢 Flat Management":
         # Update session state with edited values so they persist if other tabs are clicked
         st.session_state.calc_df = edited_df.copy()
 
-        # --- Silently load carry forward from flat_carry_forward table ---
+        # --- Silently load carry forward ---
+        # Priority: flat_carry_forward table (manually managed, upload-safe)
+        # Fallback: Outstanding from first record in payment_history (for flats not yet in flat_carry_forward)
         carry_forward_input = 0.0
         if selected_flat != "-- Select Flat --":
             try:
@@ -828,9 +929,20 @@ elif app_mode == "🏢 Flat Management":
                     con=_cf_load_eng,
                 )
                 if not _cf_row.empty:
+                    # flat_carry_forward has an explicit entry (may be 0 if user cleared it)
                     carry_forward_input = float(_cf_row.iloc[0]["Outstanding"])
+                else:
+                    # No entry yet — fall back to first record in payment_history
+                    _ph_row = pd.read_sql(
+                        f"SELECT `Outstanding` FROM payment_history "
+                        f"WHERE `Flat Number` = '{selected_flat}' ORDER BY `Date` ASC LIMIT 1",
+                        con=_cf_load_eng,
+                    )
+                    if not _ph_row.empty:
+                        carry_forward_input = float(_ph_row.iloc[0]["Outstanding"])
             except Exception:
                 carry_forward_input = 0.0
+
 
         # Seed calculation engine
         results = []
@@ -930,54 +1042,90 @@ elif app_mode == "🏢 Flat Management":
         st.markdown(f"#### 📊 Final Computed Ledger (Simple Interest) for {selected_flat if selected_flat != '-- Select Flat --' else 'Pending Selection'}")
         
         # Show carry-forward banner if available
-        if selected_flat != "-- Select Flat --":
-            try:
-                import sqlalchemy as _sqla_cf
-                _cf_preview = pd.read_sql(
-                    f"SELECT `Outstanding` FROM payment_history "
-                    f"WHERE `Flat Number` = '{selected_flat}' "
-                    f"ORDER BY `Date` ASC LIMIT 1",
-                    con=_sqla_cf.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"),
-                )
-                if not _cf_preview.empty:
-                    _cf_val = float(_cf_preview.iloc[0]["Outstanding"])
-                    st.markdown(
-                        f"""<div style="background:linear-gradient(90deg,#fca311,#e3910c);padding:12px 20px;border-radius:10px;
-                        font-size:1.1rem;font-weight:700;color:#000;margin-bottom:12px;">
-                        📌 Carry Forward (Opening Outstanding): ₹{_cf_val:,.2f}</div>""",
-                        unsafe_allow_html=True,
-                    )
-            except Exception:
-                pass
+        # Show carry-forward banner using the value already loaded from flat_carry_forward
+        if carry_forward_input > 0:
+            st.markdown(
+                f"""<div style="background:linear-gradient(90deg,#fca311,#e3910c);padding:12px 20px;border-radius:10px;
+                font-size:1.1rem;font-weight:700;color:#000;margin-bottom:12px;">
+                📌 Carry Forward (Opening Outstanding): ₹{carry_forward_input:,.2f}</div>""",
+                unsafe_allow_html=True,
+            )
 
         st.dataframe(display_df, use_container_width=True, hide_index=True)
-        
 
-        # --- Final Flat Metrics ---
+        # --- Excel Download ---
+        import io
+        def to_excel(df):
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Ledger")
+            return buf.getvalue()
+
+        flat_label = selected_flat if selected_flat != "-- Select Flat --" else "All_Flats"
+        fy_label_clean = selected_fy_label.replace("/", "-").replace(" ", "_")
+        st.download_button(
+            label="⬇️ Download Ledger as Excel",
+            data=to_excel(res_df),
+            file_name=f"Ledger_{flat_label}_{fy_label_clean}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # --- Send Payment Receipt Email ---
+        st.markdown("---")
+        if st.button("📧 Send Payment Receipt to Flat Owner", type="primary", use_container_width=True):
+            _sett = load_settings()
+            _brevo_login = _sett.get("brevo_login", "").strip()
+            _brevo_key = _sett.get("brevo_smtp_key", "").strip()
+            if not _brevo_login or not _brevo_key:
+                st.error("❌ Brevo credentials not configured. Go to ⚙️ Settings and enter your Brevo Login Email and SMTP Key.")
+            else:
+                try:
+                    import sqlalchemy as _sqla_email
+                    _email_eng = _sqla_email.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                    _flat_row = pd.read_sql(
+                        f"SELECT `Owner Name`, `Email ID` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
+                        con=_email_eng,
+                    )
+                    if _flat_row.empty or not str(_flat_row.iloc[0].get("Email ID", "")).strip():
+                        st.toast(f"⚠️ Add an email for flat {selected_flat} first!", icon="📧")
+                        st.warning(f"No email ID found for **{selected_flat}**. Please go to the 📥 Bulk Upload tab and add an email for this flat.")
+                    else:
+                        _to_email = str(_flat_row.iloc[0]["Email ID"]).strip()
+                        _owner = str(_flat_row.iloc[0].get("Owner Name", "Resident"))
+                        with st.spinner(f"📤 Sending receipt to {_to_email}..."):
+                            try:
+                                send_payment_receipt(
+                                    to_email=_to_email,
+                                    flat_no=selected_flat,
+                                    owner_name=_owner,
+                                    fy_label=selected_fy_label,
+                                    res_df=res_df,
+                                    carry_forward=carry_forward_input,
+                                    brevo_login=_brevo_login,
+                                    brevo_smtp_key=_brevo_key,
+                                    from_email=_sett.get("gmail_sender_email", "bhumisilveriiocwing@gmail.com"),
+                                )
+                                st.success(f"✅ Receipt sent successfully to **{_to_email}** ({_owner})")
+                            except Exception as _mail_err:
+                                st.error(f"❌ Failed to send email: {_mail_err}")
+                except Exception as _db_err:
+                    st.error(f"❌ Could not fetch flat email from DB: {_db_err}")
+
+
         if selected_flat != "-- Select Flat --":
             with summary_container:
                 st.markdown("---")
                 st.markdown(f"### 🎯 Year-End Summary for {selected_flat}")
+
                 
                 # Extract the final month's metrics directly from the calculation engine's final iteration
                 final_principal = closing_principal
                 final_penalties = accumulated_penalty
                 final_total_obligation = final_principal + final_penalties
                 
-                # Fetch carry forward from first record in payment_history (opening outstanding)
-                carry_forward = 0.0
-                if selected_flat != "-- Select Flat --":
-                    try:
-                        cf_df = pd.read_sql(
-                            f"SELECT `Outstanding` FROM payment_history "
-                            f"WHERE `Flat Number` = '{selected_flat}' "
-                            f"ORDER BY `Date` ASC LIMIT 1",
-                            con=engine,
-                        )
-                        if not cf_df.empty:
-                            carry_forward = float(cf_df.iloc[0]["Outstanding"])
-                    except Exception as e:
-                        st.warning(f"Could not fetch carry forward amount: {e}")
+                # Use already-loaded carry forward (from flat_carry_forward table)
+                carry_forward = carry_forward_input
+
 
                 # Display final metrics including Carry Forward
                 m1, m2, m3, m4 = st.columns(4)
@@ -1331,16 +1479,32 @@ elif app_mode == "⚙️ Settings":
             new_grace = st.number_input("Penalty Applied After Day of Month", min_value=1, max_value=31, value=int(current_settings["grace_period_day"]), help="e.g., If set to 10, penalties apply after the 10th of the month.")
         with col2:
             new_penalty_apr = st.number_input("Late Payment Annual Interest Rate (%)", min_value=0.0, value=float(current_settings.get("penalty_apr", 18.0)), step=1.0, help="Annual Percentage Rate. Will divide by 12 for monthly calculation.")
-        
+
+        st.markdown("---")
+        st.markdown("#### 📧 Email Receipt Settings (Brevo SMTP)")
+        st.caption("Sign up free at [brevo.com](https://www.brevo.com) → SMTP & API → Copy SMTP Key")
+        ecol1, ecol2 = st.columns(2)
+        with ecol1:
+            new_sender_email = st.text_input("📤 Sender Email Address", value=current_settings.get("gmail_sender_email", "bhumisilveriiocwing@gmail.com"), help="The email address receipts are sent FROM (must be verified in Brevo).")
+            new_brevo_login = st.text_input("👤 Brevo Login Email", value=current_settings.get("brevo_login", ""), help="Your Brevo account email (used as SMTP username).")
+        with ecol2:
+            new_brevo_key = st.text_input("🔑 Brevo SMTP Key", value=current_settings.get("brevo_smtp_key", ""), type="password", help="Found in Brevo dashboard → SMTP & API → SMTP Keys.")
+
         submitted = st.form_submit_button("💾 Save Settings", type="primary")
         if submitted:
             new_settings = {
                 "base_maintenance": new_base,
                 "penalty_apr": new_penalty_apr,
-                "grace_period_day": new_grace
+                "grace_period_day": new_grace,
+                "gmail_sender_email": new_sender_email,
+                "brevo_login": new_brevo_login,
+                "brevo_smtp_key": new_brevo_key,
             }
             save_settings(new_settings)
             st.success("✅ Society settings updated successfully!")
+
+
+
 
     # --- Database Connection Settings ---
     st.markdown("---")
