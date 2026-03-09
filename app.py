@@ -600,62 +600,29 @@ if app_mode == "🔍 Transaction Search":
     st.markdown("### 📋 Transaction & Reconciliation Records")
     st.markdown('<p class="info-text" style="font-size: 0.9rem;">View statements or reconciliations. Navigate the tabs below.</p>', unsafe_allow_html=True)
     
-    # State variables for auto-filling the submission form based on selection
-    sel_amount = 0.0
-    sel_date = None
-    sel_narration = ""
-    is_tx_selected = False
+    # State variable for the selected dataframe to pass to the preview section
+    selected_tx_df = None
     
     tab1, tab2 = st.tabs(["📊 Account Statement Records", "🏦 Bank Reconciliation Status"])
     
     with tab1:
         if len(filtered_df_stmt) > 0:
-            st.info("💡 **Select a row below** to automatically fill the details in the '📥 Submit Payment for Approval' form.")
+            st.info("💡 **Select one or more rows** below to preview and submit them for Admin approval.")
             max_rows = min(len(filtered_df_stmt), 500)
             
             selection_stmt = st.dataframe(
                 filtered_df_stmt.head(max_rows),
                 use_container_width=True,
-                selection_mode="single-row",
+                selection_mode="multi-row",
                 on_select="rerun",
                 hide_index=True,
                 height=400
             )
             
             if len(selection_stmt.selection.rows) > 0:
-                is_tx_selected = True
-                selected_idx = selection_stmt.selection.rows[0]
-                selected_row = filtered_df_stmt.head(max_rows).iloc[selected_idx]
+                selected_indices = selection_stmt.selection.rows
+                selected_tx_df = filtered_df_stmt.head(max_rows).iloc[selected_indices].copy()
                 
-                # Extract Date
-                date_col = next((c for c in selected_row.index if 'date' in str(c).lower()), None)
-                if date_col:
-                    try:
-                        import pandas as pd
-                        sel_date = pd.to_datetime(selected_row[date_col], dayfirst=True).date()
-                    except:
-                        pass
-                        
-                # Extract Amount (looking for Credit/Deposit/Amount columns)
-                amount_cols = [c for c in selected_row.index if any(x in str(c).lower() for x in ['amount', 'credit', 'deposit'])]
-                if amount_cols:
-                    for ac in amount_cols:
-                        try:
-                            # Strip out commas and attempt convert to float
-                            val = float(str(selected_row[ac]).replace(',', '').strip())
-                            if val > 0:
-                                sel_amount = float(val)
-                                break
-                        except:
-                            continue
-                            
-                # Extract Narration
-                narration_cols = [c for c in selected_row.index if any(x in str(c).lower() for x in ['narration', 'particular', 'description'])]
-                if not narration_cols and len(selected_row.index) > 1:
-                    narration_cols = [selected_row.index[1]] # Fallback to col B
-                if narration_cols:
-                    sel_narration = str(selected_row[narration_cols[0]])
-                    
             if len(filtered_df_stmt) > 500:
                 st.caption(f"Showing first 500 of {len(filtered_df_stmt)} statement records.")
         else:
@@ -673,86 +640,197 @@ if app_mode == "🔍 Transaction Search":
             st.warning("No Bank Reconciliation records found matching your query.")
 
     st.markdown("---")
-    with st.expander("📥 Submit Payment for Approval", expanded=is_tx_selected):
-        if is_tx_selected:
-            st.success("✅ Transaction selected. Form has been pre-filled with the available details.")
-        else:
-            st.markdown("Found a transaction that belongs to a flat? Select it in the table above to auto-fill, or manually submit it here for Admin approval.")
+    
+    if selected_tx_df is not None and not selected_tx_df.empty:
+        st.markdown("### 📥 Preview & Submit Selected Payments")
+        st.success(f"✅ Picked {len(selected_tx_df)} transaction(s) for submission. Please assign a Flat Number and Ledger details for each.")
+        
+        # 1. Prepare dynamic flat list for dropdown validation
+        _flat_list = [""]
+        try:
+            _eng_f = get_engine()
+            import pandas as _pd
+            _df_f = _pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_f)
+            # Make sure we don't have dupes and format properly
+            _flat_list = [""] + sorted([str(f).strip() for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
+        except Exception:
+            pass
             
-        with st.form("submit_approval_form", clear_on_submit=True):
-            col_pf1, col_pf2, col_pf3 = st.columns(3)
-            with col_pf1:
-                _flat_list = []
+        # 2. Re-format the selected dataset into a cleanly structured Pending schema
+        preview_data = []
+        months = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
+        
+        for _, row in selected_tx_df.iterrows():
+            # --- Extract standard fields exactly as we did before ---
+            p_date = None
+            date_col = next((c for c in row.index if 'date' in str(c).lower()), None)
+            if date_col:
                 try:
-                    _eng_f = get_engine()
-                    import pandas as _pd
-                    _df_f = _pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_f)
-                    _flat_list = sorted([str(f) for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
+                    import pandas as pd
+                    p_date = pd.to_datetime(row[date_col], dayfirst=True).strftime("%Y-%m-%d")
                 except:
-                    pass
-                m_flat = st.selectbox("Select Flat", ["-- Select Flat --"] + _flat_list)
-                
-                m_date_kwargs = {"value": None}
-                if sel_date:
-                    m_date_kwargs["value"] = sel_date
-                m_date = st.date_input("Payment Date", **m_date_kwargs)
-            with col_pf2:
-                m_amount_kwargs = {"min_value": 1.0, "step": 100.0}
-                if sel_amount >= 1.0:
-                    m_amount_kwargs["value"] = sel_amount
-                m_amount = st.number_input("Amount (₹)", **m_amount_kwargs)
-                m_month = st.selectbox("For Ledger Month", ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"])
-            with col_pf3:
-                m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=2024, step=1)
-                m_narration_kwargs = {}
-                if sel_narration:
-                    m_narration_kwargs["value"] = sel_narration
-                m_narration = st.text_input("Narration / UTR Reference", **m_narration_kwargs)
-                
-            submitted = st.form_submit_button("📤 Submit for Approval", type="primary", use_container_width=True)
-            if submitted:
-                if m_flat == "-- Select Flat --":
-                    st.error("❌ Please select a valid Flat No.")
-                elif not m_date:
-                    st.error("❌ Please select a payment date.")
-                else:
-                    m_date_str = m_date.strftime("%Y-%m-%d %H:%M:%S")
-                    m_month_label = f"{m_month} {m_year}"
+                    p_date = str(row[date_col])
+                    
+            p_amount = 0.0
+            amount_cols = [c for c in row.index if any(x in str(c).lower() for x in ['amount', 'credit', 'deposit'])]
+            if amount_cols:
+                for ac in amount_cols:
                     try:
-                        _sa_eng = get_engine()
-                        import sqlalchemy as _sa
-                        with _sa_eng.connect() as _conn:
-                            _conn.execute(_sa.text("""
-                                CREATE TABLE IF NOT EXISTS pending_payments (
-                                    id INT AUTO_INCREMENT PRIMARY KEY,
-                                    `Flat Number` VARCHAR(50),
-                                    `Month` VARCHAR(20),
-                                    `Date` VARCHAR(20),
-                                    `Narration` TEXT,
-                                    `Amount` DECIMAL(12,2),
-                                    `narration_ref` VARCHAR(100),
-                                    `submitted_by` VARCHAR(50),
-                                    `submitted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                                )
-                            """))
-                            
-                            _conn.execute(_sa.text("""
-                                INSERT INTO pending_payments 
-                                (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
-                                VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
-                            """), {
-                                "flat": m_flat,
-                                "month": m_month_label,
-                                "date": m_date_str,
-                                "narration": m_narration,
-                                "amount": m_amount,
-                                "ref": m_narration[:100] if m_narration else None,
-                                "by": st.session_state.username
-                            })
-                            _conn.commit()
-                        st.success(f"✅ Payment of ₹{m_amount:,.2f} for {m_flat} submitted and is awaiting Admin approval!")
+                        val = float(str(row[ac]).replace(',', '').strip())
+                        if val > 0:
+                            p_amount = float(val)
+                            break
+                    except:
+                        continue
+                        
+            p_narration = ""
+            narration_cols = [c for c in row.index if any(x in str(c).lower() for x in ['narration', 'particular', 'description'])]
+            if not narration_cols and len(row.index) > 1:
+                narration_cols = [row.index[1]]
+            if narration_cols:
+                p_narration = str(row[narration_cols[0]])
+                
+            # --- AI: Auto-Extract Flat Number from Narration ---
+            detected_flat = ""
+            import re
+            
+            # 1. Global Override: If the user searched for a specific Flat pattern, use that immediately for ALL selections!
+            if search_query:
+                # Same regex pattern as before: C(optional digit)-(3 or 4 digits)
+                match = re.search(r'C\d?-\d{3,4}', search_query.upper())
+                if match:
+                    extracted = match.group(0)
+                    if extracted not in _flat_list:
+                        _flat_list.append(extracted)
+                    detected_flat = extracted
+
+            # 2. Row Fallback: If no explicit flat query was used, scan the row's narration text
+            if not detected_flat and p_narration:
+                narration_upper = p_narration.upper()
+                
+                # Try RegEx extraction first for patterns like C1-902, C2-1101, C-101
+                match = re.search(r'C\d?-\d{3,4}', narration_upper)
+                if match:
+                    extracted = match.group(0)
+                    # Try to map the extracted value to a valid choice in the dropdown
+                    if len(_flat_list) > 1:
+                        for f_no in _flat_list:
+                            if extracted == f_no.upper():
+                                detected_flat = f_no
+                                break
+                    # If not perfectly in the dropdown but found via regex, force it in
+                    if not detected_flat:
+                        if extracted not in _flat_list:
+                            _flat_list.append(extracted)
+                        detected_flat = extracted
+                
+                # Fallback to pure substring match
+                if not detected_flat and len(_flat_list) > 1:
+                    for f_no in _flat_list:
+                        if f_no and f_no.upper() in narration_upper:
+                            detected_flat = f_no
+                            break
+            
+            preview_data.append({
+                "Assign Flat No": detected_flat, 
+                "Ledger Month": "Apr", 
+                "Ledger Year": 2024,
+                "Amount (₹)": p_amount,
+                "Date": p_date,
+                "Narration Ref": p_narration
+            })
+            
+        preview_df = pd.DataFrame(preview_data)
+        
+        # 3. Create the Editable Dataframe
+        edited_preview = st.data_editor(
+            preview_df,
+            column_config={
+                "Assign Flat No": st.column_config.SelectboxColumn(
+                    "Flat Number",
+                    help="Assign the flat. Auto-detected from narration if available.",
+                    width="medium",
+                    options=_flat_list,
+                    required=True
+                ),
+                "Ledger Month": st.column_config.SelectboxColumn(
+                    "Month",
+                    options=months,
+                    required=True
+                ),
+                "Ledger Year": st.column_config.NumberColumn(
+                    "Year",
+                    min_value=2020,
+                    max_value=2030,
+                    step=1,
+                    required=True
+                ),
+                "Amount (₹)": st.column_config.NumberColumn(disabled=True),
+                "Date": st.column_config.TextColumn(disabled=True),
+                "Narration Ref": st.column_config.TextColumn(disabled=True, width="large"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed"
+        )
+        
+        if st.button("📤 Bulk Submit to Pending Approvals", type="primary"):
+            errors = []
+            success_count = 0
+            
+            _sa_eng = get_engine()
+            import sqlalchemy as _sa
+            
+            with _sa_eng.begin() as _conn: # Using explicit transaction
+                # Ensure table exists
+                _conn.execute(_sa.text("""
+                    CREATE TABLE IF NOT EXISTS pending_payments (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        `Flat Number` VARCHAR(50),
+                        `Month` VARCHAR(20),
+                        `Date` VARCHAR(20),
+                        `Narration` TEXT,
+                        `Amount` DECIMAL(12,2),
+                        `narration_ref` VARCHAR(100),
+                        `submitted_by` VARCHAR(50),
+                        `submitted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                
+                # Insert each edited row
+                for idx, row in edited_preview.iterrows():
+                    m_flat = str(row["Assign Flat No"]).strip()
+                    if not m_flat:
+                        errors.append(f"Row {idx+1}: Missing Flat Number.")
+                        continue
+                        
+                    m_month_label = f"{row['Ledger Month']} {row['Ledger Year']}"
+                    
+                    try:
+                        _conn.execute(_sa.text("""
+                            INSERT INTO pending_payments 
+                            (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
+                            VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
+                        """), {
+                            "flat": m_flat,
+                            "month": m_month_label,
+                            "date": row["Date"],
+                            "narration": row["Narration Ref"],
+                            "amount": float(row["Amount (₹)"]),
+                            "ref": str(row["Narration Ref"])[:100] if row["Narration Ref"] else None,
+                            "by": st.session_state.username
+                        })
+                        success_count += 1
                     except Exception as e:
-                        st.error(f"❌ DB Error: {e}")
+                        errors.append(f"Row {idx+1}: DB error - {e}")
+                        
+            if success_count > 0:
+                st.success(f"🎉 Successfully submitted {success_count} payment(s) to the Admin Pending Approvals queue!")
+            if errors:
+                for err in errors:
+                    st.error(err)
+    else:
+        st.info("💡 Make a selection in the Accounts Statement Records table above to view the preview and submit payments for approval.")
 
     if st.session_state.role == "admin":
         st.markdown("---")
@@ -1852,75 +1930,119 @@ elif app_mode == "✅ Pending Approvals":
         else:
             st.markdown(f"**{len(pending_df)} payment(s) awaiting approval.**")
             
-            # Make an interactive dataframe to select single row
-            st.info("💡 **Select a row below** to approve or reject the payment.")
+            # --- Filters ---
+            with st.expander("🔍 Filter Pending Approvals", expanded=False):
+                f_col1, f_col2, f_col3 = st.columns(3)
+                
+                # Fetch distinct flats currently in pending queue
+                available_flats = ["All"] + sorted(pending_df["Flat Number"].dropna().unique().tolist())
+                
+                with f_col1:
+                    filter_flat = st.selectbox("By Flat Number", available_flats)
+                with f_col2:
+                    # Convert dates safely to allow filtering
+                    pending_df['Date_dt'] = pd.to_datetime(pending_df["Date"], errors='coerce')
+                    min_date = pending_df['Date_dt'].min()
+                    max_date = pending_df['Date_dt'].max()
+                    
+                    if pd.notna(min_date) and pd.notna(max_date):
+                        date_range = st.date_input("Date Range", value=(min_date.date(), max_date.date()), min_value=min_date.date(), max_value=max_date.date())
+                    else:
+                        date_range = None
+                        st.info("No valid dates found in pending queue.")
+                with f_col3:
+                    st.write("")
+                    st.write("")
+                    if st.button("Clear Filters", use_container_width=True):
+                        st.rerun()
+
+            # Apply filters
+            filtered_pending_df = pending_df.copy()
+            if filter_flat != "All":
+                filtered_pending_df = filtered_pending_df[filtered_pending_df["Flat Number"] == filter_flat]
+                
+            if date_range and len(date_range) == 2:
+                start_date, end_date = date_range
+                # Make sure the parsed date falls within the selected range
+                filtered_pending_df = filtered_pending_df[
+                    (filtered_pending_df['Date_dt'].dt.date >= start_date) & 
+                    (filtered_pending_df['Date_dt'].dt.date <= end_date)
+                ]
             
-            # Display dataframe without ID if possible, but we need ID to delete/approve
-            display_cols = [c for c in pending_df.columns if c != "id"]
-            
-            selection_event = st.dataframe(
-                pending_df[display_cols],
-                use_container_width=True,
-                selection_mode="single-row",
-                on_select="rerun",
-                hide_index=True
-            )
-            
-            if len(selection_event.selection.rows) > 0:
-                selected_idx = selection_event.selection.rows[0]
-                selected_row = pending_df.iloc[selected_idx]
+            if filtered_pending_df.empty:
+                st.warning("No pending payments match your filters.")
+            else:
+                st.info("💡 **Select a row below** to approve or reject the payment.")
+                display_cols = [c for c in pending_df.columns if c not in ["id", "Date_dt"]]
                 
-                st.markdown("---")
-                st.markdown(f"### Reviewing Payment for **{selected_row['Flat Number']}**")
+                selection_event = st.dataframe(
+                    filtered_pending_df[display_cols],
+                    use_container_width=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    hide_index=True
+                )
                 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("Amount", f"₹{selected_row['Amount']:,.2f}")
-                    st.metric("Ledger Month", selected_row["Month"])
-                with c2:
-                    st.metric("Payment Date", str(selected_row["Date"]))
-                    st.metric("Submitted By", selected_row["submitted_by"])
-                with c3:
-                    st.write("**Narration / Ref:**")
-                    st.write(selected_row["Narration"] if selected_row["Narration"] else "—")
+                if len(selection_event.selection.rows) > 0:
+                    selected_idx = selection_event.selection.rows[0]
+                    selected_row = filtered_pending_df.iloc[selected_idx]
                 
-                col_app, col_rej = st.columns(2)
-                with col_app:
-                    if st.button("✅ Approve & Move to Ledger", type="primary", use_container_width=True):
-                        try:
-                            with engine.connect() as conn:
-                                # Insert into payment_history
-                                conn.execute(_sa.text("""
-                                    INSERT INTO payment_history 
-                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
-                                    VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
-                                """), {
-                                    "flat": selected_row["Flat Number"],
-                                    "month": selected_row["Month"],
-                                    "date": selected_row["Date"],
-                                    "narration": selected_row["Narration"],
-                                    "amount": float(selected_row["Amount"]),
-                                    "ref": selected_row["narration_ref"]
-                                })
-                                # Delete from pending
-                                conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
-                                conn.commit()
-                            st.success(f"✅ Approved! ₹{selected_row['Amount']:,.2f} added to {selected_row['Flat Number']} ledger.")
-                            st.session_state.calc_key += 1
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Failed to approve: {e}")
-                
-                with col_rej:
-                    if st.button("❌ Reject & Discard", use_container_width=True):
-                        try:
-                            with engine.connect() as conn:
-                                conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
-                                conn.commit()
-                            st.warning(f"🗑️ Payment submission discarded.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Failed to reject: {e}")
+                    st.markdown("---")
+                    st.markdown(f"### Reviewing Payment for **{selected_row['Flat Number']}**")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("Amount", f"₹{selected_row['Amount']:,.2f}")
+                        st.metric("Ledger Month", selected_row["Month"])
+                    with c2:
+                        st.metric("Payment Date", str(selected_row["Date"]))
+                        st.metric("Submitted By", selected_row["submitted_by"])
+                    with c3:
+                        st.write("**Narration / Ref:**")
+                        st.write(selected_row["Narration"] if selected_row["Narration"] else "—")
+                    
+                    col_app, col_rej = st.columns(2)
+                    with col_app:
+                        if st.button("✅ Approve & Move to Ledger", type="primary", use_container_width=True):
+                            try:
+                                with engine.connect() as conn:
+                                    # Insert into payment_history with IGNORE to catch potential duplicates
+                                    result = conn.execute(_sa.text("""
+                                        INSERT IGNORE INTO payment_history 
+                                        (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                        VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
+                                    """), {
+                                        "flat": selected_row["Flat Number"],
+                                        "month": selected_row["Month"],
+                                        "date": selected_row["Date"],
+                                        "narration": selected_row["Narration"],
+                                        "amount": float(selected_row["Amount"]),
+                                        "ref": selected_row["narration_ref"]
+                                    })
+                                    
+                                    if result.rowcount > 0:
+                                        # Delete from pending since it successfully moved to ledger
+                                        conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
+                                        conn.commit()
+                                        st.success(f"✅ Approved! ₹{selected_row['Amount']:,.2f} added to {selected_row['Flat Number']} ledger.")
+                                        st.session_state.calc_key += 1
+                                        st.rerun()
+                                    else:
+                                        # It was skipped because of the UNIQUE KEY matching an existing DB record
+                                        st.warning(f"⚠️ Duplicate Detected: This exact payment of ₹{selected_row['Amount']:,.2f} on {selected_row['Date']} for {selected_row['Flat Number']} is already in the ledger. Please hit 'Reject & Discard'.")
+                            except Exception as e:
+                                st.error(f"❌ Failed to approve: {e}")
+                    
+                    with col_rej:
+                        if st.button("❌ Reject & Discard", use_container_width=True):
+                            try:
+                                with engine.connect() as conn:
+                                    conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
+                                    conn.commit()
+                                st.warning(f"🗑️ Payment submission discarded.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Failed to reject: {e}")
 
     except Exception as e:
         st.error(f"❌ DB Error fetching pending payments: {e}")
