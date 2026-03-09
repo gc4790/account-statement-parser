@@ -146,7 +146,7 @@ def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_
 
 
 # --- Multi-Payment Breakdown Popup ---
-@st.dialog("💳 Payment Breakdown")
+@st.dialog("💳 Payment Breakdown", width="large")
 def _show_payment_breakdown(month_label, txns):
     import pandas as _pd_dlg
     total = sum(float(t.get("Amount", 0)) for t in txns)
@@ -281,9 +281,102 @@ def load_bank_rec_data(file_source):
         st.error(f"Error parsing Bank Reconciliation: {e}")
         return None
 
+# --- User Authentication & Session State ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.role = None
+
+def init_auth_db():
+    try:
+        engine = get_engine()
+        import sqlalchemy as _sa
+        with engine.connect() as conn:
+            conn.execute(_sa.text("""
+                CREATE TABLE IF NOT EXISTS app_users (
+                    username VARCHAR(50) PRIMARY KEY,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL
+                )
+            """))
+            res = conn.execute(_sa.text("SELECT COUNT(*) FROM app_users")).scalar()
+            if res == 0:
+                from passlib.hash import pbkdf2_sha256
+                default_hash = pbkdf2_sha256.hash("admin123")
+                conn.execute(_sa.text("INSERT INTO app_users (username, password_hash, role) VALUES ('admin', :hash, 'admin')"), {"hash": default_hash})
+                conn.commit()
+    except Exception as e:
+        # Silently fail if DB isn't configured yet (allows Settings to be visible on first install if we bypass)
+        pass
+
+init_auth_db()
+
+# --- Login UI ---
+if not st.session_state.logged_in:
+    st.markdown("<br><h2 style='text-align: center; color: #fca311;'>🔒 Login to Society Plus</h2>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+            
+            if submitted:
+                try:
+                    engine = get_engine()
+                    import sqlalchemy as _sa
+                    with engine.connect() as conn:
+                        user_row = conn.execute(_sa.text("SELECT password_hash, role FROM app_users WHERE username = :u"), {"u": username}).fetchone()
+                        if user_row:
+                            from passlib.hash import pbkdf2_sha256
+                            is_valid = False
+                            try:
+                                is_valid = pbkdf2_sha256.verify(password, user_row[0])
+                            except ValueError:
+                                try:
+                                    from passlib.hash import bcrypt
+                                    is_valid = bcrypt.verify(password, user_row[0])
+                                except:
+                                    pass
+
+                            if is_valid:
+                                st.session_state.logged_in = True
+                                st.session_state.username = username
+                                st.session_state.role = user_row[1]
+                                st.rerun()
+                            else:
+                                st.error("❌ Incorrect password")
+                        else:
+                            st.error("❌ Username not found")
+                except Exception as e:
+                    st.error(f"❌ Database connection error. Check your DB config. Details: {e}")
+    st.stop()
+
+
 # --- Navigation ---
+st.sidebar.markdown(f"👤 **Logged in as:** `{st.session_state.username}`")
+st.sidebar.caption(f"🛡️ Role: **{str(st.session_state.role).upper()}**")
+if st.sidebar.button("🚪 Logout", use_container_width=True):
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.role = None
+    st.rerun()
+st.sidebar.divider()
+
 st.sidebar.markdown("## 🧭 Navigation")
-app_mode = st.sidebar.radio("Select View:", ["🔍 Transaction Search", "🏢 Flat Management", "📤 Upload Payments", "⚙️ Settings"])
+
+# Hide Settings from Viewer role
+nav_options = ["🔍 Transaction Search", "🏢 Flat Management"]
+if st.session_state.role in ["admin", "manager"]:
+    nav_options.append("📤 Upload Payments")
+if st.session_state.role == "admin":
+    nav_options.append("✅ Pending Approvals")
+    nav_options.append("👥 User Management")
+    nav_options.append("⚙️ Settings")
+
+nav_options.append("🔑 Change Password")
+
+app_mode = st.sidebar.radio("Select View:", nav_options)
 
 # --- Load DB config globally (used across all pages) ---
 _cfg = load_db_config()
@@ -507,135 +600,64 @@ if app_mode == "🔍 Transaction Search":
     st.markdown("### 📋 Transaction & Reconciliation Records")
     st.markdown('<p class="info-text" style="font-size: 0.9rem;">View statements or reconciliations. Navigate the tabs below.</p>', unsafe_allow_html=True)
     
+    # State variables for auto-filling the submission form based on selection
+    sel_amount = 0.0
+    sel_date = None
+    sel_narration = ""
+    is_tx_selected = False
+    
     tab1, tab2 = st.tabs(["📊 Account Statement Records", "🏦 Bank Reconciliation Status"])
     
     with tab1:
         if len(filtered_df_stmt) > 0:
-            col_b_name = "Narration (Col B)" if "Narration (Col B)" in df_stmt.columns else df_stmt.columns[1]
-            
-            # We will build an HTML table that includes a copy button for each row using JavaScript.
-            html_table = f"""
-            <style>
-            .table-container {{
-                width: 100%;
-                overflow-x: auto;
-                border-radius: 10px;
-                margin-bottom: 20px;
-            }}
-            .custom-table {{
-                width: 100%;
-                min-width: 800px;
-                border-collapse: collapse;
-                font-family: 'Inter', sans-serif;
-                color: #ffffff;
-                background-color: #1a1e2b;
-            }}
-            .custom-table th, .custom-table td {{
-                padding: 12px 15px;
-                text-align: left;
-                border-bottom: 1px solid #3a3f58;
-                word-wrap: break-word;
-            }}
-            .custom-table th {{
-                background-color: #0e1117;
-                color: #fca311;
-                font-weight: 600;
-                text-transform: uppercase;
-                font-size: 0.85rem;
-                position: sticky;
-                top: 0;
-                z-index: 10;
-            }}
-            /* Pin the action column to the right */
-            .custom-table th:last-child,
-            .custom-table td:last-child {{
-                position: sticky;
-                right: 0;
-                background-color: #1a1e2b;
-                box-shadow: -2px 0 5px rgba(0,0,0,0.2);
-                z-index: 5;
-            }}
-            .custom-table th:last-child {{
-                background-color: #0e1117;
-                z-index: 11;
-            }}
-            .custom-table tr:hover td {{
-                background-color: #2a2f45;
-            }}
-            .copy-btn {{
-                background-color: #fca311;
-                color: #000;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 5px;
-                cursor: pointer;
-                font-weight: bold;
-                transition: background-color 0.2s;
-                display: inline-flex;
-                align-items: center;
-                gap: 5px;
-                white-space: nowrap;
-            }}
-            .copy-btn:hover {{
-                background-color: #e3910c;
-            }}
-            </style>
-            <script>
-            function copyNarration(btn, text) {{
-                navigator.clipboard.writeText(text).then(function() {{
-                    const originalText = btn.innerHTML;
-                    btn.innerHTML = '📋 Copied!';
-                    btn.style.backgroundColor = '#4caf50';
-                    btn.style.color = '#fff';
-                    setTimeout(function() {{
-                        btn.innerHTML = originalText;
-                        btn.style.backgroundColor = '#fca311';
-                        btn.style.color = '#000';
-                    }}, 2000);
-                }}, function(err) {{
-                    console.error('Could not copy text: ', err);
-                }});
-            }}
-            </script>
-            <div class="table-container">
-            <table class="custom-table">
-                <thead>
-                    <tr>
-            """
-            
-            # Render table headers
-            for col in filtered_df_stmt.columns:
-                html_table += f"<th>{col}</th>"
-            html_table += "<th>Action</th></tr></thead><tbody>"
-            
-            # Render table rows
-            import json
+            st.info("💡 **Select a row below** to automatically fill the details in the '📥 Submit Payment for Approval' form.")
             max_rows = min(len(filtered_df_stmt), 500)
-            for idx, row in filtered_df_stmt.head(max_rows).iterrows():
-                html_table += "<tr>"
-                
-                raw_narration = str(row.get(col_b_name, ""))
-                js_safe_narration = json.dumps(raw_narration).replace('"', '&quot;')
-                
-                for col in filtered_df_stmt.columns:
-                    val = row[col]
-                    html_table += f"<td>{val}</td>"
-                    
-                html_table += f"""
-                    <td>
-                        <!-- We pass the safely encoded string to our JS function -->
-                        <button class='copy-btn' onclick="copyNarration(this, {js_safe_narration})">
-                            📋 Copy Narration
-                        </button>
-                    </td>
-                </tr>
-                """
-                
-            html_table += "</tbody></table></div>"
-            if len(filtered_df_stmt) > 500:
-                html_table += f"<div style='text-align: center; color: #fca311; padding: 10px;'>Showing first 500 of {len(filtered_df_stmt)} statement records.</div>"
             
-            st.components.v1.html(html_table, height=500, scrolling=True)
+            selection_stmt = st.dataframe(
+                filtered_df_stmt.head(max_rows),
+                use_container_width=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                hide_index=True,
+                height=400
+            )
+            
+            if len(selection_stmt.selection.rows) > 0:
+                is_tx_selected = True
+                selected_idx = selection_stmt.selection.rows[0]
+                selected_row = filtered_df_stmt.head(max_rows).iloc[selected_idx]
+                
+                # Extract Date
+                date_col = next((c for c in selected_row.index if 'date' in str(c).lower()), None)
+                if date_col:
+                    try:
+                        import pandas as pd
+                        sel_date = pd.to_datetime(selected_row[date_col], dayfirst=True).date()
+                    except:
+                        pass
+                        
+                # Extract Amount (looking for Credit/Deposit/Amount columns)
+                amount_cols = [c for c in selected_row.index if any(x in str(c).lower() for x in ['amount', 'credit', 'deposit'])]
+                if amount_cols:
+                    for ac in amount_cols:
+                        try:
+                            # Strip out commas and attempt convert to float
+                            val = float(str(selected_row[ac]).replace(',', '').strip())
+                            if val > 0:
+                                sel_amount = float(val)
+                                break
+                        except:
+                            continue
+                            
+                # Extract Narration
+                narration_cols = [c for c in selected_row.index if any(x in str(c).lower() for x in ['narration', 'particular', 'description'])]
+                if not narration_cols and len(selected_row.index) > 1:
+                    narration_cols = [selected_row.index[1]] # Fallback to col B
+                if narration_cols:
+                    sel_narration = str(selected_row[narration_cols[0]])
+                    
+            if len(filtered_df_stmt) > 500:
+                st.caption(f"Showing first 500 of {len(filtered_df_stmt)} statement records.")
         else:
             st.warning("No Account Statement records found matching your query.")
     
@@ -650,6 +672,143 @@ if app_mode == "🔍 Transaction Search":
         else:
             st.warning("No Bank Reconciliation records found matching your query.")
 
+    st.markdown("---")
+    with st.expander("📥 Submit Payment for Approval", expanded=is_tx_selected):
+        if is_tx_selected:
+            st.success("✅ Transaction selected. Form has been pre-filled with the available details.")
+        else:
+            st.markdown("Found a transaction that belongs to a flat? Select it in the table above to auto-fill, or manually submit it here for Admin approval.")
+            
+        with st.form("submit_approval_form", clear_on_submit=True):
+            col_pf1, col_pf2, col_pf3 = st.columns(3)
+            with col_pf1:
+                _flat_list = []
+                try:
+                    _eng_f = get_engine()
+                    import pandas as _pd
+                    _df_f = _pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_f)
+                    _flat_list = sorted([str(f) for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
+                except:
+                    pass
+                m_flat = st.selectbox("Select Flat", ["-- Select Flat --"] + _flat_list)
+                
+                m_date_kwargs = {"value": None}
+                if sel_date:
+                    m_date_kwargs["value"] = sel_date
+                m_date = st.date_input("Payment Date", **m_date_kwargs)
+            with col_pf2:
+                m_amount_kwargs = {"min_value": 1.0, "step": 100.0}
+                if sel_amount >= 1.0:
+                    m_amount_kwargs["value"] = sel_amount
+                m_amount = st.number_input("Amount (₹)", **m_amount_kwargs)
+                m_month = st.selectbox("For Ledger Month", ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"])
+            with col_pf3:
+                m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=2024, step=1)
+                m_narration_kwargs = {}
+                if sel_narration:
+                    m_narration_kwargs["value"] = sel_narration
+                m_narration = st.text_input("Narration / UTR Reference", **m_narration_kwargs)
+                
+            submitted = st.form_submit_button("📤 Submit for Approval", type="primary", use_container_width=True)
+            if submitted:
+                if m_flat == "-- Select Flat --":
+                    st.error("❌ Please select a valid Flat No.")
+                elif not m_date:
+                    st.error("❌ Please select a payment date.")
+                else:
+                    m_date_str = m_date.strftime("%Y-%m-%d %H:%M:%S")
+                    m_month_label = f"{m_month} {m_year}"
+                    try:
+                        _sa_eng = get_engine()
+                        import sqlalchemy as _sa
+                        with _sa_eng.connect() as _conn:
+                            _conn.execute(_sa.text("""
+                                CREATE TABLE IF NOT EXISTS pending_payments (
+                                    id INT AUTO_INCREMENT PRIMARY KEY,
+                                    `Flat Number` VARCHAR(50),
+                                    `Month` VARCHAR(20),
+                                    `Date` VARCHAR(20),
+                                    `Narration` TEXT,
+                                    `Amount` DECIMAL(12,2),
+                                    `narration_ref` VARCHAR(100),
+                                    `submitted_by` VARCHAR(50),
+                                    `submitted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                                )
+                            """))
+                            
+                            _conn.execute(_sa.text("""
+                                INSERT INTO pending_payments 
+                                (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
+                                VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
+                            """), {
+                                "flat": m_flat,
+                                "month": m_month_label,
+                                "date": m_date_str,
+                                "narration": m_narration,
+                                "amount": m_amount,
+                                "ref": m_narration[:100] if m_narration else None,
+                                "by": st.session_state.username
+                            })
+                            _conn.commit()
+                        st.success(f"✅ Payment of ₹{m_amount:,.2f} for {m_flat} submitted and is awaiting Admin approval!")
+                    except Exception as e:
+                        st.error(f"❌ DB Error: {e}")
+
+    if st.session_state.role == "admin":
+        st.markdown("---")
+        with st.expander("➕ Add Payment to Flat Ledger", expanded=False):
+            st.markdown("Found a missing transaction? Manually add it to a Flat's ledger here.")
+            with st.form("manual_payment_form", clear_on_submit=True):
+                col_pf1, col_pf2, col_pf3 = st.columns(3)
+                with col_pf1:
+                    _flat_list_admin = []
+                    try:
+                        _eng_admin = get_engine()
+                        import pandas as _pd_admin
+                        _df_admin = _pd_admin.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_admin)
+                        _flat_list_admin = sorted([str(f) for f in _df_admin['Flat No'].dropna().unique() if str(f).strip()])
+                    except:
+                        pass
+                    m_flat = st.selectbox("Select Flat", ["-- Select Flat --"] + _flat_list_admin)
+                    m_date = st.date_input("Payment Date", value=None)
+                with col_pf2:
+                    m_amount = st.number_input("Amount (₹)", min_value=1.0, step=100.0)
+                    m_month = st.selectbox("For Ledger Month", ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"])
+                with col_pf3:
+                    m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=2024, step=1)
+                    m_narration = st.text_input("Narration / UTR Reference")
+                    
+                submitted = st.form_submit_button("💾 Save Payment to DB", type="primary", use_container_width=True)
+                if submitted:
+                    if m_flat == "-- Select Flat --":
+                        st.error("❌ Please select a valid Flat No.")
+                    elif not m_date:
+                        st.error("❌ Please select a payment date.")
+                    else:
+                        m_date_str = m_date.strftime("%Y-%m-%d %H:%M:%S")
+                        m_month_label = f"{m_month} {m_year}"
+                        try:
+                            _sa_eng = get_engine()
+                            import sqlalchemy as _sa
+                            with _sa_eng.connect() as _conn:
+                                _conn.execute(_sa.text("""
+                                    INSERT INTO payment_history 
+                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                    VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
+                                """), {
+                                    "flat": m_flat,
+                                    "month": m_month_label,
+                                    "date": m_date_str,
+                                    "narration": m_narration,
+                                    "amount": m_amount,
+                                    "ref": m_narration[:200] if m_narration else None
+                                })
+                                _conn.commit()
+                            st.success(f"✅ ₹{m_amount:,.2f} added to {m_flat} for {m_month_label}!")
+                            st.session_state.calc_key += 1 # force refresh ledger if it's open
+                        except Exception as e:
+                            st.error(f"❌ DB Error: {e}")
+
 elif app_mode == "🏢 Flat Management":
     st.markdown("---")
     
@@ -662,8 +821,12 @@ elif app_mode == "🏢 Flat Management":
         try:
             engine = get_engine()
 
-            flat_file = st.file_uploader("📥 Bulk Upload Flat & Tenant Details (.xls / .xlsx)", type=["xls", "xlsx"], key="flat_upload")
-            
+            if st.session_state.role == "admin":
+                flat_file = st.file_uploader("📥 Bulk Upload Flat & Tenant Details (.xls / .xlsx)", type=["xls", "xlsx"], key="flat_upload")
+            else:
+                flat_file = None
+                st.info("🔒 You have view-only access to the Flat & Tenant Database. Only Admins can upload changes.")
+
             try:
                 df_flat_db = pd.read_sql("SELECT * FROM flat_details", con=engine)
             except Exception:
@@ -727,7 +890,8 @@ elif app_mode == "🏢 Flat Management":
                 
             edited_df = st.data_editor(
                 df_flat, 
-                num_rows="dynamic",
+                num_rows="dynamic" if st.session_state.role == "admin" else "fixed",
+                disabled=st.session_state.role != "admin",
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -736,10 +900,11 @@ elif app_mode == "🏢 Flat Management":
                 }
             )
             
-            if st.button("💾 Save Database Changes", type="primary"):
-                with st.spinner("Saving to MySQL..."):
-                    edited_df.to_sql(name="flat_details", con=engine, if_exists="replace", index=False)
-                st.success("✅ Changes successfully saved to `society_plus` database!")
+            if st.session_state.role == "admin":
+                if st.button("💾 Save Database Changes", type="primary"):
+                    with st.spinner("Saving to MySQL..."):
+                        edited_df.to_sql(name="flat_details", con=engine, if_exists="replace", index=False)
+                    st.success("✅ Changes successfully saved to `society_plus` database!")
         except Exception as e:
             st.error(f"❌ Failed to connect to MySQL. Ensure your credentials in the sidebar are correct. Error: {e}")
 
@@ -840,6 +1005,14 @@ elif app_mode == "🏢 Flat Management":
             else:
                 fy_months = build_fy_months(selected_year)
 
+            # Trim months beyond the current month
+            _now = pd.Timestamp.now()
+            _month_abbrs = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+            fy_months = [
+                (m, y) for m, y in fy_months
+                if pd.Timestamp(year=y, month=_month_abbrs.index(m)+1, day=1) <= _now.replace(day=1)
+            ]
+
             months_with_year = [f"{m} {y}" for m, y in fy_months]
             num_months = len(fy_months)
             st.session_state.calc_df = pd.DataFrame({
@@ -937,11 +1110,6 @@ elif app_mode == "🏢 Flat Management":
         if "calc_df" in st.session_state:
             st.session_state.calc_df["Base Dues"] = base_dues
             
-        if st.button("Reset Payments to Zero"):
-            st.session_state.calc_df["Payment Received"] = 0.0
-            st.session_state.calc_key += 1
-            st.rerun()
-            
         st.markdown("#### 📝 Input Payments (Editable)")
         st.info("Edit the **Payment Received** column below to simulate different scenarios. The Ledger will dynamically recalculate below.")
         
@@ -959,34 +1127,6 @@ elif app_mode == "🏢 Flat Management":
         )
         # Update session state with edited values so they persist if other tabs are clicked
         st.session_state.calc_df = edited_df.copy()
-
-        # --- Multi-payment badge popup triggers ---
-        _txns_by_month = st.session_state.get("payment_txns_by_month", {})
-        _multi_months = {m: t for m, t in _txns_by_month.items() if len(t) > 1}
-        if _multi_months:
-            st.markdown(
-                """
-                <style>
-                .mp-pills .stButton > button {
-                    padding: 3px 12px; font-size: 0.76rem; height: auto; line-height: 1.5;
-                    background: rgba(252,163,17,0.12); color: #fca311;
-                    border: 1px solid #fca311; border-radius: 14px;
-                    font-weight: 700; white-space: nowrap;
-                }
-                .mp-pills .stButton > button:hover {
-                    background: rgba(252,163,17,0.30);
-                }
-                </style>
-                <div class='mp-pills'>
-                """,
-                unsafe_allow_html=True,
-            )
-            _bcols = st.columns(len(_multi_months))
-            for _i, (_lbl, _txns) in enumerate(_multi_months.items()):
-                with _bcols[_i]:
-                    if st.button(f"🔢 {len(_txns)}  {_lbl}", key=f"mpbadge_{_lbl}"):
-                        _show_payment_breakdown(_lbl, _txns)
-            st.markdown("</div>", unsafe_allow_html=True)
 
         # --- Silently load carry forward ---
         # Priority: flat_carry_forward table (manually managed, upload-safe)
@@ -1111,6 +1251,10 @@ elif app_mode == "🏢 Flat Management":
                 
         display_df = res_df.copy()
         
+        # Inject the "💳 Txns" column from calc_df into our display_df for the final table display
+        if "💳 Txns" in st.session_state.calc_df.columns:
+            display_df.insert(0, "💳 Txns", st.session_state.calc_df["💳 Txns"].values)
+        
         # Format general currency columns 
         for col in ["Current Dues", "Amount Paid", "New Penalty Added", "Unpaid Penalties"]:
             display_df[col] = display_df[col].apply(lambda x: f"₹{x:,.2f}")
@@ -1131,7 +1275,29 @@ elif app_mode == "🏢 Flat Management":
                 unsafe_allow_html=True,
             )
 
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.info("💡 **Tip:** Click any row with a 🔢 badge below to view its full transaction breakdown.")
+        
+        # Make the dataframe interactive so we can capture clicks
+        # We need a unique key that changes if data changes, but sticks around for selection
+        table_key = f"ledger_table_{st.session_state.calc_key}_{selected_flat}"
+        
+        event = st.dataframe(
+            display_df, 
+            use_container_width=True, 
+            hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
+            key=table_key
+        )
+        
+        # Check if user clicked a row
+        if len(event.selection.rows) > 0:
+            selected_row_idx = event.selection.rows[0]
+            selected_month = display_df.iloc[selected_row_idx]["Month"]
+            # See if there are multiple txns for this month
+            _txns_by_month = st.session_state.get("payment_txns_by_month", {})
+            if selected_month in _txns_by_month and len(_txns_by_month[selected_month]) > 1:
+                _show_payment_breakdown(selected_month, _txns_by_month[selected_month])
 
         # --- Excel Download ---
         import io
@@ -1152,43 +1318,44 @@ elif app_mode == "🏢 Flat Management":
 
         # --- Send Payment Receipt Email ---
         st.markdown("---")
-        if st.button("📧 Send Payment Receipt to Flat Owner", type="primary", use_container_width=True):
-            _sett = load_settings()
-            _brevo_login = _sett.get("brevo_login", "").strip()
-            _brevo_key = _sett.get("brevo_smtp_key", "").strip()
-            if not _brevo_login or not _brevo_key:
-                st.error("❌ Brevo credentials not configured. Go to ⚙️ Settings and enter your Brevo Login Email and SMTP Key.")
-            else:
-                try:
-                    _email_eng = get_engine()
-                    _flat_row = pd.read_sql(
-                        f"SELECT `Owner Name`, `Email ID` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
-                        con=_email_eng,
-                    )
-                    if _flat_row.empty or not str(_flat_row.iloc[0].get("Email ID", "")).strip():
-                        st.toast(f"⚠️ Add an email for flat {selected_flat} first!", icon="📧")
-                        st.warning(f"No email ID found for **{selected_flat}**. Please go to the 📥 Bulk Upload tab and add an email for this flat.")
-                    else:
-                        _to_email = str(_flat_row.iloc[0]["Email ID"]).strip()
-                        _owner = str(_flat_row.iloc[0].get("Owner Name", "Resident"))
-                        with st.spinner(f"📤 Sending receipt to {_to_email}..."):
-                            try:
-                                send_payment_receipt(
-                                    to_email=_to_email,
-                                    flat_no=selected_flat,
-                                    owner_name=_owner,
-                                    fy_label=selected_fy_label,
-                                    res_df=res_df,
-                                    carry_forward=carry_forward_input,
-                                    brevo_login=_brevo_login,
-                                    brevo_smtp_key=_brevo_key,
-                                    from_email=_sett.get("gmail_sender_email", "bhumisilveriiocwing@gmail.com"),
-                                )
-                                st.success(f"✅ Receipt sent successfully to **{_to_email}** ({_owner})")
-                            except Exception as _mail_err:
-                                st.error(f"❌ Failed to send email: {_mail_err}")
-                except Exception as _db_err:
-                    st.error(f"❌ Could not fetch flat email from DB: {_db_err}")
+        if st.session_state.role == "admin":
+            if st.button("📧 Send Payment Receipt to Flat Owner", type="primary", use_container_width=True):
+                _sett = load_settings()
+                _brevo_login = _sett.get("brevo_login", "").strip()
+                _brevo_key = _sett.get("brevo_smtp_key", "").strip()
+                if not _brevo_login or not _brevo_key:
+                    st.error("❌ Brevo credentials not configured. Go to ⚙️ Settings and enter your Brevo Login Email and SMTP Key.")
+                else:
+                    try:
+                        _email_eng = get_engine()
+                        _flat_row = pd.read_sql(
+                            f"SELECT `Owner Name`, `Email ID` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
+                            con=_email_eng,
+                        )
+                        if _flat_row.empty or not str(_flat_row.iloc[0].get("Email ID", "")).strip():
+                            st.toast(f"⚠️ Add an email for flat {selected_flat} first!", icon="📧")
+                            st.warning(f"No email ID found for **{selected_flat}**. Please go to the 📥 Bulk Upload tab and add an email for this flat.")
+                        else:
+                            _to_email = str(_flat_row.iloc[0]["Email ID"]).strip()
+                            _owner = str(_flat_row.iloc[0].get("Owner Name", "Resident"))
+                            with st.spinner(f"📤 Sending receipt to {_to_email}..."):
+                                try:
+                                    send_payment_receipt(
+                                        to_email=_to_email,
+                                        flat_no=selected_flat,
+                                        owner_name=_owner,
+                                        fy_label=selected_fy_label,
+                                        res_df=res_df,
+                                        carry_forward=carry_forward_input,
+                                        brevo_login=_brevo_login,
+                                        brevo_smtp_key=_brevo_key,
+                                        from_email=_sett.get("gmail_sender_email", "bhumisilveriiocwing@gmail.com"),
+                                    )
+                                    st.success(f"✅ Receipt sent successfully to **{_to_email}** ({_owner})")
+                                except Exception as _mail_err:
+                                    st.error(f"❌ Failed to send email: {_mail_err}")
+                    except Exception as _db_err:
+                        st.error(f"❌ Could not fetch flat email from DB: {_db_err}")
 
 
         if selected_flat != "-- Select Flat --":
@@ -1657,6 +1824,286 @@ elif app_mode == "⚙️ Settings":
             except Exception as e:
                 st.error(f"❌ Database Error: {e}")
 
+# --- Pending Approvals Menu ---
+elif app_mode == "✅ Pending Approvals":
+    st.title("✅ Pending Payment Approvals")
+    st.markdown('<p class="info-text">Review and approve payments submitted by managers from the Transaction Search page.</p>', unsafe_allow_html=True)
+    
+    if st.session_state.role != "admin":
+        st.error("🔒 You do not have permission to view this page. Only Admins can approve payments.")
+        st.stop()
+        
+    try:
+        engine = get_engine()
+        import sqlalchemy as _sa
+        with engine.connect() as conn:
+            # Check if table exists
+            has_table = conn.execute(_sa.text(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'pending_payments'"
+            )).scalar() > 0
+            
+            if has_table:
+                pending_df = pd.read_sql("SELECT * FROM pending_payments ORDER BY submitted_at DESC", con=conn)
+            else:
+                pending_df = pd.DataFrame()
+            
+        if pending_df.empty:
+            st.success("🎉 No pending payments! The queue is currently empty.")
+        else:
+            st.markdown(f"**{len(pending_df)} payment(s) awaiting approval.**")
+            
+            # Make an interactive dataframe to select single row
+            st.info("💡 **Select a row below** to approve or reject the payment.")
+            
+            # Display dataframe without ID if possible, but we need ID to delete/approve
+            display_cols = [c for c in pending_df.columns if c != "id"]
+            
+            selection_event = st.dataframe(
+                pending_df[display_cols],
+                use_container_width=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                hide_index=True
+            )
+            
+            if len(selection_event.selection.rows) > 0:
+                selected_idx = selection_event.selection.rows[0]
+                selected_row = pending_df.iloc[selected_idx]
+                
+                st.markdown("---")
+                st.markdown(f"### Reviewing Payment for **{selected_row['Flat Number']}**")
+                
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Amount", f"₹{selected_row['Amount']:,.2f}")
+                    st.metric("Ledger Month", selected_row["Month"])
+                with c2:
+                    st.metric("Payment Date", str(selected_row["Date"]))
+                    st.metric("Submitted By", selected_row["submitted_by"])
+                with c3:
+                    st.write("**Narration / Ref:**")
+                    st.write(selected_row["Narration"] if selected_row["Narration"] else "—")
+                
+                col_app, col_rej = st.columns(2)
+                with col_app:
+                    if st.button("✅ Approve & Move to Ledger", type="primary", use_container_width=True):
+                        try:
+                            with engine.connect() as conn:
+                                # Insert into payment_history
+                                conn.execute(_sa.text("""
+                                    INSERT INTO payment_history 
+                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                    VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
+                                """), {
+                                    "flat": selected_row["Flat Number"],
+                                    "month": selected_row["Month"],
+                                    "date": selected_row["Date"],
+                                    "narration": selected_row["Narration"],
+                                    "amount": float(selected_row["Amount"]),
+                                    "ref": selected_row["narration_ref"]
+                                })
+                                # Delete from pending
+                                conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
+                                conn.commit()
+                            st.success(f"✅ Approved! ₹{selected_row['Amount']:,.2f} added to {selected_row['Flat Number']} ledger.")
+                            st.session_state.calc_key += 1
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Failed to approve: {e}")
+                
+                with col_rej:
+                    if st.button("❌ Reject & Discard", use_container_width=True):
+                        try:
+                            with engine.connect() as conn:
+                                conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
+                                conn.commit()
+                            st.warning(f"🗑️ Payment submission discarded.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Failed to reject: {e}")
+
+    except Exception as e:
+        st.error(f"❌ DB Error fetching pending payments: {e}")
+
+# --- User Management Menu ---
+elif app_mode == "👥 User Management":
+    st.title("👥 User Management")
+    st.markdown('<p class="info-text">Add, edit, or remove access for society staff and administrators.</p>', unsafe_allow_html=True)
+    
+    if st.session_state.role != "admin":
+        st.error("🔒 You do not have permission to view this page. Only Admins can manage users.")
+        st.stop()
+        
+    tab_list, tab_add, tab_reset = st.tabs(["📋 Existing Users", "➕ Add New User", "🔐 Reset Passwords"])
+    
+    with tab_list:
+        try:
+            engine = get_engine()
+            import sqlalchemy as _sa
+            with engine.connect() as conn:
+                users_df = pd.read_sql("SELECT username, role FROM app_users", con=conn)
+                
+            st.markdown("### Enrolled Users")
+            st.dataframe(
+                users_df,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown("---")
+            st.markdown("#### 🗑️ Remove User")
+            del_user = st.selectbox("Select User to Remove", ["-- Select User --"] + users_df["username"].tolist())
+            if st.button("🚨 Delete Selected User", type="primary"):
+                if del_user == "-- Select User --":
+                    st.error("Please select a user to delete.")
+                elif del_user == st.session_state.username:
+                    st.error("🛑 You cannot delete your own active session account!")
+                elif del_user == "admin":
+                    st.error("🛑 The default 'admin' account cannot be deleted.")
+                else:
+                    try:
+                        with engine.connect() as conn:
+                            conn.execute(_sa.text("DELETE FROM app_users WHERE username = :u"), {"u": del_user})
+                            conn.commit()
+                        st.success(f"✅ User '{del_user}' was successfully removed.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Could not delete user: {e}")
+        except Exception as e:
+            st.error(f"❌ DB Error fetching users: {e}")
+            
+    with tab_add:
+        st.markdown("### Create Fresh Credentials")
+        with st.form("add_user_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_username = st.text_input("New Username (no spaces)")
+                new_role = st.selectbox("Grant Role", ["viewer", "manager", "admin"], help="Admins can manage settings and users. Managers can upload data. Viewers can only search/print receipts.")
+            with c2:
+                new_password = st.text_input("Temporary Password", type="password")
+                new_password_confirm = st.text_input("Confirm Password", type="password")
+                
+            submitted = st.form_submit_button("💾 Provision User Account", type="primary", use_container_width=True)
+            if submitted:
+                new_username = new_username.strip().lower()
+                if not new_username:
+                    st.error("❌ Username cannot be empty.")
+                elif " " in new_username:
+                    st.error("❌ Username cannot contain spaces.")
+                elif not new_password or new_password != new_password_confirm:
+                    st.error("❌ Passwords do not match or are empty.")
+                else:
+                    try:
+                        from passlib.hash import pbkdf2_sha256
+                        engine = get_engine()
+                        import sqlalchemy as _sa
+                        with engine.connect() as conn:
+                            # Check if exists
+                            exists = conn.execute(_sa.text("SELECT 1 FROM app_users WHERE username = :u"), {"u": new_username}).fetchone()
+                            if exists:
+                                st.error(f"❌ Username '{new_username}' already exists. Please choose another.")
+                            else:
+                                hash_pwd = pbkdf2_sha256.hash(new_password)
+                                conn.execute(_sa.text(
+                                    "INSERT INTO app_users (username, password_hash, role) VALUES (:u, :p, :r)"
+                                ), {"u": new_username, "p": hash_pwd, "r": new_role})
+                                conn.commit()
+                                st.success(f"✅ User '{new_username}' created successfully as a '{new_role}'! They can now log in.")
+                    except Exception as e:
+                        st.error(f"❌ DB Error: {e}")
+
+    with tab_reset:
+        st.markdown("### Admin Password Override")
+        st.info("As an Admin, you can forcefully overwrite any user's password if they forget it.")
+        try:
+            engine = get_engine()
+            import sqlalchemy as _sa
+            with engine.connect() as conn:
+                all_usernames = [r[0] for r in conn.execute(_sa.text("SELECT username FROM app_users")).fetchall()]
+        except Exception:
+            all_usernames = []
+            
+        with st.form("admin_reset_password_form", clear_on_submit=True):
+            reset_target = st.selectbox("Select User", ["-- Select User --"] + all_usernames)
+            admin_new_pass = st.text_input("New Password", type="password")
+            admin_conf_pass = st.text_input("Confirm New Password", type="password")
+            submitted = st.form_submit_button("🚨 Force Reset Password", type="primary")
+            
+            if submitted:
+                if reset_target == "-- Select User --":
+                    st.error("❌ Please select a user.")
+                elif not admin_new_pass or admin_new_pass != admin_conf_pass:
+                    st.error("❌ Passwords do not match or are empty.")
+                else:
+                    try:
+                        from passlib.hash import pbkdf2_sha256
+                        engine = get_engine()
+                        import sqlalchemy as _sa
+                        with engine.connect() as conn:
+                            hash_pwd = pbkdf2_sha256.hash(admin_new_pass)
+                            conn.execute(_sa.text("UPDATE app_users SET password_hash = :p WHERE username = :u"), {"p": hash_pwd, "u": reset_target})
+                            conn.commit()
+                            st.success(f"✅ Password for '{reset_target}' has been successfully reset!")
+                    except Exception as e:
+                        st.error(f"❌ DB Error: {e}")
+
+
+# --- Change Password Menu (For all users) ---
+elif app_mode == "🔑 Change Password":
+    st.title("🔑 Change Your Password")
+    st.markdown('<p class="info-text">Update your login password to keep your account secure.</p>', unsafe_allow_html=True)
+    
+    with st.form("change_password_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            old_pass = st.text_input("Current Password", type="password")
+        with col2:
+            st.empty() # Spacer
+            
+        c1, c2 = st.columns(2)
+        with c1:
+            new_pass = st.text_input("New Password", type="password")
+        with c2:
+            new_pass_confirm = st.text_input("Confirm New Password", type="password")
+            
+        submitted = st.form_submit_button("💾 Update Password", type="primary")
+        
+        if submitted:
+            if not old_pass:
+                st.error("❌ Please enter your current password.")
+            elif not new_pass or new_pass != new_pass_confirm:
+                st.error("❌ New passwords do not match or are empty.")
+            else:
+                try:
+                    from passlib.hash import pbkdf2_sha256
+                    engine = get_engine()
+                    import sqlalchemy as _sa
+                    with engine.connect() as conn:
+                        user_row = conn.execute(_sa.text("SELECT password_hash FROM app_users WHERE username = :u"), {"u": st.session_state.username}).fetchone()
+                        
+                        if user_row:
+                            is_valid = False
+                            try:
+                                is_valid = pbkdf2_sha256.verify(old_pass, user_row[0])
+                            except ValueError:
+                                # Fallback if they had a legacy bcrypt hash
+                                try:
+                                    from passlib.hash import bcrypt
+                                    is_valid = bcrypt.verify(old_pass, user_row[0])
+                                except:
+                                    pass
+                                    
+                            if is_valid:
+                                hash_pwd = pbkdf2_sha256.hash(new_pass)
+                                conn.execute(_sa.text("UPDATE app_users SET password_hash = :p WHERE username = :u"), {"p": hash_pwd, "u": st.session_state.username})
+                                conn.commit()
+                                st.success("✅ Your password has been updated successfully!")
+                            else:
+                                st.error("❌ Current password is incorrect.")
+                        else:
+                            st.error("❌ User account not found.")
+                except Exception as e:
+                    st.error(f"❌ DB Error: {e}")
 
 # --- Footer ---
 st.markdown("---")
