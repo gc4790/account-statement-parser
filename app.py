@@ -30,7 +30,7 @@ def save_settings(settings):
 DB_CONFIG_FILE = "db_config.json"
 
 def load_db_config():
-    default = {"host": "localhost", "port": "3306", "user": "root", "password": "root", "database": "society_plus"}
+    default = {"host": "localhost", "port": "3306", "user": "root", "password": "root", "database": "society_plus", "use_ssl": False}
     if os.path.exists(DB_CONFIG_FILE):
         try:
             with open(DB_CONFIG_FILE, "r") as f:
@@ -42,6 +42,16 @@ def load_db_config():
 def save_db_config(cfg):
     with open(DB_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=4)
+
+
+def get_engine():
+    """Create a SQLAlchemy engine from db_config.json. Enables SSL for cloud DBs like TiDB."""
+    import sqlalchemy as _sa_eng
+    _c = load_db_config()
+    _url = f"mysql+pymysql://{_c['user']}:{_c['password']}@{_c['host']}:{_c['port']}/{_c['database']}"
+    if _c.get("use_ssl", False):
+        return _sa_eng.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
+    return _sa_eng.create_engine(_url)
 
 
 def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_forward, brevo_login, brevo_smtp_key, from_email="bhumisilveriiocwing@gmail.com"):
@@ -260,6 +270,7 @@ db_port = _cfg["port"]
 db_user = _cfg["user"]
 db_pass = _cfg["password"]
 db_name = _cfg["database"]
+db_ssl = _cfg.get("use_ssl", False)
 
 
 if "df_stmt" not in st.session_state:
@@ -320,8 +331,7 @@ elif app_mode == "🏢 Flat Management":
     # --- Single shared flat selector ABOVE tabs ---
     _flat_list_shared = []
     try:
-        import sqlalchemy as _sqla_shared
-        _eng_shared = _sqla_shared.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+        _eng_shared = get_engine()
         _df_shared = pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_shared)
         if not _df_shared.empty:
             _flat_list_shared = sorted(_df_shared['Flat No'].dropna().unique().tolist())
@@ -335,8 +345,7 @@ elif app_mode == "🏢 Flat Management":
     with tab_search:
         if selected_flat != "-- Select Flat --":
             try:
-                import sqlalchemy as _sqla_srch
-                _eng_srch = _sqla_srch.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                _eng_srch = get_engine()
                 _df_srch = pd.read_sql(
                     f"SELECT * FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
                     con=_eng_srch,
@@ -629,9 +638,8 @@ elif app_mode == "🏢 Flat Management":
         st.markdown('<p class="info-text">Manage flat owners, tenant details, and area specifications natively in MySQL.</p>', unsafe_allow_html=True)
         
         try:
-            import sqlalchemy
-            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
-            
+            engine = get_engine()
+
             flat_file = st.file_uploader("📥 Bulk Upload Flat & Tenant Details (.xls / .xlsx)", type=["xls", "xlsx"], key="flat_upload")
             
             try:
@@ -819,8 +827,7 @@ elif app_mode == "🏢 Flat Management":
             
             if selected_flat != "-- Select Flat --":
                 try:
-                    import sqlalchemy
-                    engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                    engine = get_engine()
                     # Fetch all payments for the selected flat
                     df_hist = pd.read_sql(
                         f"SELECT `Month`, `Amount`, `Date` FROM payment_history "
@@ -914,10 +921,10 @@ elif app_mode == "🏢 Flat Management":
         carry_forward_input = 0.0
         if selected_flat != "-- Select Flat --":
             try:
-                import sqlalchemy as _sqla_cf_load
-                _cf_load_eng = _sqla_cf_load.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                _cf_load_eng = get_engine()
                 with _cf_load_eng.connect() as _conn:
-                    _conn.execute(_sqla_cf_load.text("""
+                    import sqlalchemy
+                    _conn.execute(sqlalchemy.text("""
                         CREATE TABLE IF NOT EXISTS `flat_carry_forward` (
                             `Flat Number` VARCHAR(50) PRIMARY KEY,
                             `Outstanding` DOUBLE NOT NULL DEFAULT 0.0
@@ -1080,8 +1087,7 @@ elif app_mode == "🏢 Flat Management":
                 st.error("❌ Brevo credentials not configured. Go to ⚙️ Settings and enter your Brevo Login Email and SMTP Key.")
             else:
                 try:
-                    import sqlalchemy as _sqla_email
-                    _email_eng = _sqla_email.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                    _email_eng = get_engine()
                     _flat_row = pd.read_sql(
                         f"SELECT `Owner Name`, `Email ID` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1",
                         con=_email_eng,
@@ -1300,8 +1306,7 @@ elif app_mode == "📤 Upload Payments":
                         
                         # --- Show duplicate transactions (already in DB) ---
                         try:
-                            import sqlalchemy as _sa
-                            _engine = _sa.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                            _engine = get_engine()
                             with _engine.connect() as _conn:
                                 # Check which rows from this sheet already exist in DB
                                 dup_rows = []
@@ -1333,8 +1338,7 @@ elif app_mode == "📤 Upload Payments":
                     st.markdown("---")
                     if st.button("💾 Save Approved Payments to Database", type="primary"):
                         try:
-                            import sqlalchemy
-                            engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                            engine = get_engine()
                             rows_to_save = []
                             for sheet, edited_df in all_edited.items():
                                 approved_rows = edited_df[edited_df["Approved"] == True].drop(columns=["Approved"])
@@ -1520,6 +1524,7 @@ elif app_mode == "⚙️ Settings":
         with col2:
             new_db_port = st.text_input("Port", value=str(db_port))
             new_db_pass = st.text_input("Password", value=db_pass, type="password")
+        new_use_ssl = st.checkbox("🔒 Enable SSL (required for TiDB / PlanetScale)", value=db_ssl)
 
         col_save, col_test = st.columns(2)
         with col_save:
@@ -1528,7 +1533,7 @@ elif app_mode == "⚙️ Settings":
             test_db_btn = st.form_submit_button("🔌 Test Connection", use_container_width=True)
 
     if save_db_btn:
-        save_db_config({"host": new_db_host, "port": new_db_port, "user": new_db_user, "password": new_db_pass, "database": new_db_name})
+        save_db_config({"host": new_db_host, "port": new_db_port, "user": new_db_user, "password": new_db_pass, "database": new_db_name, "use_ssl": new_use_ssl})
         st.success("✅ DB config saved! Restart the app to apply new connection settings.")
 
     if test_db_btn:
@@ -1537,7 +1542,9 @@ elif app_mode == "⚙️ Settings":
         else:
             try:
                 import sqlalchemy
-                test_engine = sqlalchemy.create_engine(f"mysql+pymysql://{new_db_user}:{new_db_pass}@{new_db_host}:{new_db_port}/{new_db_name}")
+                _test_url = f"mysql+pymysql://{new_db_user}:{new_db_pass}@{new_db_host}:{new_db_port}/{new_db_name}"
+                _test_args = {"ssl": {"ssl_mode": "VERIFY_IDENTITY"}} if new_use_ssl else {}
+                test_engine = sqlalchemy.create_engine(_test_url, connect_args=_test_args)
                 with test_engine.connect() as conn:
                     host_result = conn.execute(sqlalchemy.text("SELECT @@hostname, @@version")).fetchone()
                     tables_result = conn.execute(sqlalchemy.text("SHOW TABLES")).fetchall()
@@ -1557,8 +1564,8 @@ elif app_mode == "⚙️ Settings":
             st.error("⚠️ No Bank Reconciliation data loaded to sync.")
         else:
             try:
-                import sqlalchemy, re
-                engine = sqlalchemy.create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
+                import re
+                engine = get_engine()
                 def sanitize_col(col_name):
                     name = str(col_name).strip()
                     if len(name) > 60: name = name[:60]

@@ -11,6 +11,9 @@ env/
 # Settings file with secrets — never commit this
 society_settings.json
 
+# Database config with credentials — never commit this
+db_config.json
+
 # Environment files
 .env
 .env.*
