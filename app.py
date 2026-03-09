@@ -144,6 +144,28 @@ def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_
         raise Exception(f"{_last_err}")
 
 
+
+# --- Multi-Payment Breakdown Popup ---
+@st.dialog("💳 Payment Breakdown")
+def _show_payment_breakdown(month_label, txns):
+    import pandas as _pd_dlg
+    total = sum(float(t.get("Amount", 0)) for t in txns)
+    st.markdown(f"### {month_label}")
+    st.markdown(f"`{len(txns)}` payments &nbsp;·&nbsp; **Total: ₹{total:,.2f}**")
+    st.dataframe(
+        _pd_dlg.DataFrame([
+            {"#": i, "Date": t.get("Date", ""), "Amount (₹)": float(t.get("Amount", 0)), "Narration": t.get("Narration", "—") or "—"}
+            for i, t in enumerate(txns, 1)
+        ]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "#": st.column_config.NumberColumn("#", width="small"),
+            "Amount (₹)": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
+        }
+    )
+
+
 # --- Page Config & Styling ---
 st.set_page_config(
     page_title="Account Statement Parser",
@@ -782,10 +804,12 @@ elif app_mode == "🏢 Flat Management":
                 "Month": months_with_year,
                 "Base Dues": [base_dues] * num_months,
                 "Payment Received": [0.0] * num_months,
+                "💳 Txns": [""] * num_months,
             })
             st.session_state.calc_key = 0
             st.session_state.calc_year = selected_year
             st.session_state.calc_all_years = all_years_mode
+            st.session_state.payment_txns_by_month = {}
 
         # Detect flat or year change and auto-fill payments from DB
         if "last_selected_flat" not in st.session_state:
@@ -822,7 +846,9 @@ elif app_mode == "🏢 Flat Management":
                 "Month": months_with_year,
                 "Base Dues": [base_dues] * num_months,
                 "Payment Received": [0.0] * num_months,
+                "💳 Txns": [""] * num_months,
             })
+            st.session_state.payment_txns_by_month = {}
 
             
             if selected_flat != "-- Select Flat --":
@@ -830,7 +856,7 @@ elif app_mode == "🏢 Flat Management":
                     engine = get_engine()
                     # Fetch all payments for the selected flat
                     df_hist = pd.read_sql(
-                        f"SELECT `Month`, `Amount`, `Date` FROM payment_history "
+                        f"SELECT `Month`, `Amount`, `Date`, `Narration` FROM payment_history "
                         f"WHERE `Flat Number` = '{selected_flat}'",
                         con=engine
                     )
@@ -882,6 +908,24 @@ elif app_mode == "🏢 Flat Management":
                             if not idx.empty:
                                 st.session_state.calc_df.loc[idx[0], 'Payment Received'] = float(row['Amount'])
 
+                        # Build per-month transaction details for multi-payment detection
+                        txns_by_month = {}
+                        for _, r in df_hist.iterrows():
+                            lbl = f"{r['Month_Short']} {int(r['Year_Num'])}"
+                            txns_by_month.setdefault(lbl, []).append({
+                                "Amount": float(r.get("Amount", 0)),
+                                "Date": str(r.get("Date", "") or ""),
+                                "Narration": str(r.get("Narration", "") or "—"),
+                            })
+                        st.session_state.payment_txns_by_month = txns_by_month
+
+                        # Update 💳 Txns badge in calc_df
+                        for lbl, txns in txns_by_month.items():
+                            idx = st.session_state.calc_df[st.session_state.calc_df["Month"] == lbl].index
+                            if not idx.empty:
+                                cnt = len(txns)
+                                st.session_state.calc_df.loc[idx[0], "💳 Txns"] = f"🔢 {cnt}" if cnt > 1 else ""
+
 
                 except Exception:
                     pass
@@ -910,10 +954,39 @@ elif app_mode == "🏢 Flat Management":
                 "Month": st.column_config.Column("Month", disabled=True),
                 "Base Dues": st.column_config.NumberColumn("Base Dues (₹) - From Config", disabled=True),
                 "Payment Received": st.column_config.NumberColumn("Payment Received (₹)", min_value=0.0, step=100.0),
+                "💳 Txns": st.column_config.TextColumn("💳 Txns", disabled=True, width="small"),
             }
         )
         # Update session state with edited values so they persist if other tabs are clicked
         st.session_state.calc_df = edited_df.copy()
+
+        # --- Multi-payment badge popup triggers ---
+        _txns_by_month = st.session_state.get("payment_txns_by_month", {})
+        _multi_months = {m: t for m, t in _txns_by_month.items() if len(t) > 1}
+        if _multi_months:
+            st.markdown(
+                """
+                <style>
+                .mp-pills .stButton > button {
+                    padding: 3px 12px; font-size: 0.76rem; height: auto; line-height: 1.5;
+                    background: rgba(252,163,17,0.12); color: #fca311;
+                    border: 1px solid #fca311; border-radius: 14px;
+                    font-weight: 700; white-space: nowrap;
+                }
+                .mp-pills .stButton > button:hover {
+                    background: rgba(252,163,17,0.30);
+                }
+                </style>
+                <div class='mp-pills'>
+                """,
+                unsafe_allow_html=True,
+            )
+            _bcols = st.columns(len(_multi_months))
+            for _i, (_lbl, _txns) in enumerate(_multi_months.items()):
+                with _bcols[_i]:
+                    if st.button(f"🔢 {len(_txns)}  {_lbl}", key=f"mpbadge_{_lbl}"):
+                        _show_payment_breakdown(_lbl, _txns)
+            st.markdown("</div>", unsafe_allow_html=True)
 
         # --- Silently load carry forward ---
         # Priority: flat_carry_forward table (manually managed, upload-safe)
@@ -1306,6 +1379,7 @@ elif app_mode == "📤 Upload Payments":
                         
                         # --- Show duplicate transactions (already in DB) ---
                         try:
+                            import sqlalchemy as _sa
                             _engine = get_engine()
                             with _engine.connect() as _conn:
                                 # Check which rows from this sheet already exist in DB
@@ -1338,6 +1412,7 @@ elif app_mode == "📤 Upload Payments":
                     st.markdown("---")
                     if st.button("💾 Save Approved Payments to Database", type="primary"):
                         try:
+                            import sqlalchemy
                             engine = get_engine()
                             rows_to_save = []
                             for sheet, edited_df in all_edited.items():
