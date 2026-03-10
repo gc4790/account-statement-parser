@@ -1,5 +1,6 @@
 {
     "base_maintenance": 2200.0,
+    "tenant_maintenance": 2400.0,
     "penalty_apr": 21.0,
     "grace_period_day": 30,
     "gmail_sender_email": "bhumisilveriiocwing@gmail.com",

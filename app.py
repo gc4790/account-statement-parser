@@ -2,12 +2,16 @@ import streamlit as st
 import pandas as pd
 import os
 import json
+import sqlalchemy
+import re
+from sqlalchemy import text as _text
 
 SETTINGS_FILE = "society_settings.json"
 
 def load_settings():
     default_settings = {
         "base_maintenance": 2500.0,
+        "tenant_maintenance": 3000.0,
         "penalty_apr": 18.0,
         "grace_period_day": 10,
         "gmail_sender_email": "bhumisilveriiocwing@gmail.com",
@@ -46,12 +50,11 @@ def save_db_config(cfg):
 
 def get_engine():
     """Create a SQLAlchemy engine from db_config.json. Enables SSL for cloud DBs like TiDB."""
-    import sqlalchemy as _sa_eng
     _c = load_db_config()
     _url = f"mysql+pymysql://{_c['user']}:{_c['password']}@{_c['host']}:{_c['port']}/{_c['database']}"
     if _c.get("use_ssl", False):
-        return _sa_eng.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
-    return _sa_eng.create_engine(_url)
+        return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
+    return sqlalchemy.create_engine(_url)
 
 
 def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_forward, brevo_login, brevo_smtp_key, from_email="bhumisilveriiocwing@gmail.com"):
@@ -107,8 +110,9 @@ def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_
             </table>
             <table style='width:100%;margin-top:20px;background:#f9f9f9;border-radius:8px;padding:16px;'>
                 <tr><td style='padding:6px;color:#555;'>Total Paid</td><td style='text-align:right;'><strong>&#8377;{total_paid:,.2f}</strong></td></tr>
-                <tr><td style='padding:6px;color:#c0392b;'>Total Penalty</td><td style='text-align:right;color:#c0392b;'><strong>&#8377;{final_penalty:,.2f}</strong></td></tr>
-                <tr><td style='padding:6px;color:#555;'>Outstanding Balance</td><td style='text-align:right;'><strong>&#8377;{final_principal:,.2f}</strong></td></tr>
+                <tr><td style='padding:6px;color:#555;'>Total Principal Due</td><td style='text-align:right;'><strong>&#8377;{final_principal:,.2f}</strong></td></tr>
+                <tr><td style='padding:6px;color:#c0392b;'>Total Penalty Due</td><td style='text-align:right;color:#c0392b;'><strong>&#8377;{final_penalty:,.2f}</strong></td></tr>
+                <tr style='border-top:2px solid #ddd;'><td style='padding:8px 6px;color:#000;'><strong>Final Total Obligation</strong></td><td style='text-align:right;color:#000;'><strong>&#8377;{(final_principal + final_penalty):,.2f}</strong></td></tr>
             </table>
         </div>
         <div style='background:#f5f5f5;padding:14px 30px;font-size:0.8rem;color:#888;text-align:center;'>
@@ -290,20 +294,19 @@ if "logged_in" not in st.session_state:
 def init_auth_db():
     try:
         engine = get_engine()
-        import sqlalchemy as _sa
         with engine.connect() as conn:
-            conn.execute(_sa.text("""
+            conn.execute(sqlalchemy.text("""
                 CREATE TABLE IF NOT EXISTS app_users (
                     username VARCHAR(50) PRIMARY KEY,
                     password_hash VARCHAR(255) NOT NULL,
                     role VARCHAR(20) NOT NULL
                 )
             """))
-            res = conn.execute(_sa.text("SELECT COUNT(*) FROM app_users")).scalar()
+            res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM app_users")).scalar()
             if res == 0:
                 from passlib.hash import pbkdf2_sha256
                 default_hash = pbkdf2_sha256.hash("admin123")
-                conn.execute(_sa.text("INSERT INTO app_users (username, password_hash, role) VALUES ('admin', :hash, 'admin')"), {"hash": default_hash})
+                conn.execute(sqlalchemy.text("INSERT INTO app_users (username, password_hash, role) VALUES ('admin', :hash, 'admin')"), {"hash": default_hash})
                 conn.commit()
     except Exception as e:
         # Silently fail if DB isn't configured yet (allows Settings to be visible on first install if we bypass)
@@ -324,9 +327,8 @@ if not st.session_state.logged_in:
             if submitted:
                 try:
                     engine = get_engine()
-                    import sqlalchemy as _sa
                     with engine.connect() as conn:
-                        user_row = conn.execute(_sa.text("SELECT password_hash, role FROM app_users WHERE username = :u"), {"u": username}).fetchone()
+                        user_row = conn.execute(sqlalchemy.text("SELECT password_hash, role FROM app_users WHERE username = :u"), {"u": username}).fetchone()
                         if user_row:
                             from passlib.hash import pbkdf2_sha256
                             is_valid = False
@@ -368,7 +370,7 @@ st.sidebar.markdown("## 🧭 Navigation")
 # Hide Settings from Viewer role
 nav_options = ["🔍 Transaction Search", "🏢 Flat Management"]
 if st.session_state.role in ["admin", "manager"]:
-    nav_options.append("📤 Upload Payments")
+    nav_options.append("📤 Bulk Upload")
 if st.session_state.role == "admin":
     nav_options.append("✅ Pending Approvals")
     nav_options.append("👥 User Management")
@@ -392,6 +394,8 @@ if "df_stmt" not in st.session_state:
     st.session_state.df_stmt = None
 if "df_rec" not in st.session_state:
     st.session_state.df_rec = None
+if "calc_key" not in st.session_state:
+    st.session_state.calc_key = 0
 
 # Show file uploader only in Transaction Search mode
 if app_mode == "🔍 Transaction Search":
@@ -469,12 +473,41 @@ elif app_mode == "🏢 Flat Management":
                     info = _df_srch.iloc[0]
                     flat_no = info.get("Flat No", "N/A")
                     owner = info.get("Owner Name", "N/A")
-                    is_rented = info.get("Rented Status", "No")
-                    tenant = info.get("Tenant Name", "N/A") if is_rented == "Yes" else "N/A"
+                    
+                    # Normalize Rented Status to Y/N
+                    _rs_raw = str(info.get("Rented Status", "No")).strip().upper()
+                    _default_rs = "Y" if _rs_raw in ["Y", "YES"] else "N"
+                    
+                    tenant = info.get("Tenant Name", "N/A")
                     contact = info.get("Contact Number", "N/A")
                     f_type = info.get("Flat Type", "N/A")
                     f_area = info.get("Area (sq ft)", "N/A")
-                    st.info(f"### 🚪 Flat {flat_no}\n**👤 Owner:** {owner} &nbsp;&nbsp;|&nbsp;&nbsp; **📞 Contact:** {contact} &nbsp;&nbsp;|&nbsp;&nbsp; **🏠 Type:** {f_type} ({f_area} sq ft)\n\n**🔑 Rented:** {is_rented} &nbsp;&nbsp;|&nbsp;&nbsp; **🧑\u200d🤝\u200d🧑 Tenant:** {tenant}")
+                    
+                    st.markdown(f"### 🚪 Flat {flat_no}")
+                    
+                    with st.form(f"edit_flat_{flat_no}"):
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            st.write(f"**👤 Owner:** {owner}")
+                            st.write(f"**📞 Contact:** {contact}")
+                        with c2:
+                            st.write(f"**🏠 Type:** {f_type}")
+                            st.write(f"**📐 Area:** {f_area} sq ft")
+                        with c3:
+                            new_rs = st.selectbox("🔑 Rented Status", ["N", "Y"], index=0 if _default_rs == "N" else 1, help="Y = Rented, N = Owner Occupied")
+                            st.write(f"**🧑‍🤝‍🧑 Tenant:** {tenant if _default_rs == 'Y' else 'N/A'}")
+                        
+                        if st.form_submit_button("💾 Save Flat Details", type="primary"):
+                            try:
+                                with get_engine().connect() as _conn_edit:
+                                    _conn_edit.execute(sqlalchemy.text(
+                                        "UPDATE flat_details SET `Rented Status` = :rs WHERE `Flat No` = :f"
+                                    ), {"rs": new_rs, "f": flat_no})
+                                    _conn_edit.commit()
+                                st.success(f"✅ Rented Status for {flat_no} updated to '{new_rs}'!")
+                                st.rerun()
+                            except Exception as _e_upd:
+                                st.error(f"❌ Failed to update DB: {_e_upd}")
                 else:
                     st.warning("No details found for this flat.")
             except Exception as e:
@@ -646,28 +679,44 @@ if app_mode == "🔍 Transaction Search":
         st.success(f"✅ Picked {len(selected_tx_df)} transaction(s) for submission. Please assign a Flat Number and Ledger details for each.")
         
         # 1. Prepare dynamic flat list for dropdown validation
-        _flat_list = [""]
+        _flat_list = []
         try:
             _eng_f = get_engine()
-            import pandas as _pd
-            _df_f = _pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_f)
-            # Make sure we don't have dupes and format properly
-            _flat_list = [""] + sorted([str(f).strip() for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
+            _df_f = pd.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_f)
+            _flat_list = sorted([str(f).strip() for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
         except Exception:
             pass
             
+        # UI for Manual Multi-Flat Override
+        st.markdown("#### 🛠️ Manual Split Settings")
+        col_m1, col_m2 = st.columns([1, 2])
+        with col_m1:
+            enable_manual_split = st.checkbox("Apply Multi-Flat Split (Manual)", key="manual_split_check")
+        with col_m2:
+            override_flats = []
+            if enable_manual_split:
+                override_flats = st.multiselect("Select Flats for Split", options=_flat_list, key="manual_split_flats")
+                if override_flats:
+                    st.caption(f"💡 All selected transactions will be split {len(override_flats)}-way.")
+
         # 2. Re-format the selected dataset into a cleanly structured Pending schema
         preview_data = []
         months = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
         
+        _dropdown_list = [""] + _flat_list # List for the selectbox in the editor
+        
         for _, row in selected_tx_df.iterrows():
             # --- Extract standard fields exactly as we did before ---
-            p_date = None
+            p_date = ""
+            p_month = "Apr"
+            p_year = 2024
             date_col = next((c for c in row.index if 'date' in str(c).lower()), None)
             if date_col:
                 try:
-                    import pandas as pd
-                    p_date = pd.to_datetime(row[date_col], dayfirst=True).strftime("%Y-%m-%d")
+                    _dt = pd.to_datetime(row[date_col], dayfirst=True)
+                    p_date = _dt.strftime("%Y-%m-%d")
+                    p_month = _dt.strftime("%b")
+                    p_year = _dt.year
                 except:
                     p_date = str(row[date_col])
                     
@@ -690,55 +739,67 @@ if app_mode == "🔍 Transaction Search":
             if narration_cols:
                 p_narration = str(row[narration_cols[0]])
                 
-            # --- AI: Auto-Extract Flat Number from Narration ---
-            detected_flat = ""
-            import re
+            # --- AI: Auto-Extract Flat Number(s) from Narration ---
+            detected_flats = []
             
-            # 1. Global Override: If the user searched for a specific Flat pattern, use that immediately for ALL selections!
+            # 1. Global Override: If the user searched for specific Flat patterns, use them!
             if search_query:
-                # Same regex pattern as before: C(optional digit)-(3 or 4 digits)
-                match = re.search(r'C\d?-\d{3,4}', search_query.upper())
-                if match:
-                    extracted = match.group(0)
+                # Find all flat patterns in the search query
+                search_matches = re.findall(r'C\d?-\d{3,4}', search_query.upper())
+                for extracted in search_matches:
                     if extracted not in _flat_list:
                         _flat_list.append(extracted)
-                    detected_flat = extracted
+                    if extracted not in detected_flats:
+                        detected_flats.append(extracted)
 
-            # 2. Row Fallback: If no explicit flat query was used, scan the row's narration text
-            if not detected_flat and p_narration:
+            # 2. Row Fallback: Scan the row's narration text if no query matches
+            if not detected_flats and p_narration:
                 narration_upper = p_narration.upper()
+                narration_matches = re.findall(r'C\d?-\d{3,4}', narration_upper)
+                for extracted in narration_matches:
+                    # Try to map to existing or force new
+                    if extracted not in _flat_list:
+                        _flat_list.append(extracted)
+                    if extracted not in detected_flats:
+                        detected_flats.append(extracted)
                 
-                # Try RegEx extraction first for patterns like C1-902, C2-1101, C-101
-                match = re.search(r'C\d?-\d{3,4}', narration_upper)
-                if match:
-                    extracted = match.group(0)
-                    # Try to map the extracted value to a valid choice in the dropdown
-                    if len(_flat_list) > 1:
-                        for f_no in _flat_list:
-                            if extracted == f_no.upper():
-                                detected_flat = f_no
-                                break
-                    # If not perfectly in the dropdown but found via regex, force it in
-                    if not detected_flat:
-                        if extracted not in _flat_list:
-                            _flat_list.append(extracted)
-                        detected_flat = extracted
-                
-                # Fallback to pure substring match
-                if not detected_flat and len(_flat_list) > 1:
+                # If still nothing, fallback to pure substring match for known flats
+                if not detected_flats and len(_flat_list) > 1:
                     for f_no in _flat_list:
                         if f_no and f_no.upper() in narration_upper:
-                            detected_flat = f_no
+                            detected_flats.append(f_no)
                             break
             
-            preview_data.append({
-                "Assign Flat No": detected_flat, 
-                "Ledger Month": "Apr", 
-                "Ledger Year": 2024,
-                "Amount (₹)": p_amount,
-                "Date": p_date,
-                "Narration Ref": p_narration
-            })
+            # --- Build Preview Data (Handle Split Payments) ---
+            final_detected_flats = []
+            if enable_manual_split and override_flats:
+                final_detected_flats = override_flats
+            else:
+                final_detected_flats = detected_flats
+
+            if len(final_detected_flats) > 1:
+                # N-way Split between detected/manual flats
+                split_amount = p_amount / len(final_detected_flats)
+                for f_no in final_detected_flats:
+                    preview_data.append({
+                        "Assign Flat No": f_no, 
+                        "Ledger Month": p_month, 
+                        "Ledger Year": p_year,
+                        "Amount (₹)": split_amount,
+                        "Date": p_date,
+                        "Narration Ref": p_narration
+                    })
+            else:
+                # Single flat or no flat detected
+                final_flat = final_detected_flats[0] if final_detected_flats else ""
+                preview_data.append({
+                    "Assign Flat No": final_flat, 
+                    "Ledger Month": p_month, 
+                    "Ledger Year": p_year,
+                    "Amount (₹)": p_amount,
+                    "Date": p_date,
+                    "Narration Ref": p_narration
+                })
             
         preview_df = pd.DataFrame(preview_data)
         
@@ -750,7 +811,7 @@ if app_mode == "🔍 Transaction Search":
                     "Flat Number",
                     help="Assign the flat. Auto-detected from narration if available.",
                     width="medium",
-                    options=_flat_list,
+                    options=_dropdown_list,
                     required=True
                 ),
                 "Ledger Month": st.column_config.SelectboxColumn(
@@ -778,12 +839,11 @@ if app_mode == "🔍 Transaction Search":
             errors = []
             success_count = 0
             
-            _sa_eng = get_engine()
-            import sqlalchemy as _sa
+            engine = get_engine()
             
-            with _sa_eng.begin() as _conn: # Using explicit transaction
+            with engine.begin() as _conn: # Using explicit transaction
                 # Ensure table exists
-                _conn.execute(_sa.text("""
+                _conn.execute(sqlalchemy.text("""
                     CREATE TABLE IF NOT EXISTS pending_payments (
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         `Flat Number` VARCHAR(50),
@@ -807,7 +867,7 @@ if app_mode == "🔍 Transaction Search":
                     m_month_label = f"{row['Ledger Month']} {row['Ledger Year']}"
                     
                     try:
-                        _conn.execute(_sa.text("""
+                        _conn.execute(sqlalchemy.text("""
                             INSERT INTO pending_payments 
                             (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
                             VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
@@ -841,19 +901,29 @@ if app_mode == "🔍 Transaction Search":
                 with col_pf1:
                     _flat_list_admin = []
                     try:
-                        _eng_admin = get_engine()
-                        import pandas as _pd_admin
-                        _df_admin = _pd_admin.read_sql("SELECT `Flat No` FROM flat_details", con=_eng_admin)
+                        engine = get_engine()
+                        _df_admin = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
                         _flat_list_admin = sorted([str(f) for f in _df_admin['Flat No'].dropna().unique() if str(f).strip()])
                     except:
                         pass
                     m_flat = st.selectbox("Select Flat", ["-- Select Flat --"] + _flat_list_admin)
-                    m_date = st.date_input("Payment Date", value=None)
+                    m_date = st.date_input("Payment Date", value=pd.Timestamp.now().date())
+                
+                # Intelligent defaults for manual payment month/year
+                _default_month_idx = 0
+                _default_year = pd.Timestamp.now().year
+                _months_list = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
+                if m_date:
+                    _abbr = m_date.strftime("%b")
+                    if _abbr in _months_list:
+                        _default_month_idx = _months_list.index(_abbr)
+                    _default_year = m_date.year
+
                 with col_pf2:
                     m_amount = st.number_input("Amount (₹)", min_value=1.0, step=100.0)
-                    m_month = st.selectbox("For Ledger Month", ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"])
+                    m_month = st.selectbox("For Ledger Month", _months_list, index=_default_month_idx)
                 with col_pf3:
-                    m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=2024, step=1)
+                    m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=_default_year, step=1)
                     m_narration = st.text_input("Narration / UTR Reference")
                     
                 submitted = st.form_submit_button("💾 Save Payment to DB", type="primary", use_container_width=True)
@@ -866,10 +936,9 @@ if app_mode == "🔍 Transaction Search":
                         m_date_str = m_date.strftime("%Y-%m-%d %H:%M:%S")
                         m_month_label = f"{m_month} {m_year}"
                         try:
-                            _sa_eng = get_engine()
-                            import sqlalchemy as _sa
-                            with _sa_eng.connect() as _conn:
-                                _conn.execute(_sa.text("""
+                            engine = get_engine()
+                            with engine.connect() as _conn:
+                                _conn.execute(sqlalchemy.text("""
                                     INSERT INTO payment_history 
                                     (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
                                     VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
@@ -887,119 +956,190 @@ if app_mode == "🔍 Transaction Search":
                         except Exception as e:
                             st.error(f"❌ DB Error: {e}")
 
-elif app_mode == "🏢 Flat Management":
-    st.markdown("---")
+# --- Centralized Bulk Upload Menu ---
+elif app_mode == "📤 Bulk Upload":
+    st.title("📤 Centralized Bulk Upload")
+    st.markdown('<p class="info-text">Manage maintenance payments and resident database uploads in one place.</p>', unsafe_allow_html=True)
     
-
-
-    with tab_upload:
-        st.markdown("### 🏠 Flat & Tenant Database")
-        st.markdown('<p class="info-text">Manage flat owners, tenant details, and area specifications natively in MySQL.</p>', unsafe_allow_html=True)
+    # Initialize engine for the entire Bulk Upload section
+    engine = get_engine()
+    
+    if st.session_state.role not in ["admin", "manager"]:
+        st.error("🔒 You do not have permission to access Bulk Uploads.")
+        st.stop()
         
-        try:
-            engine = get_engine()
+    tab_payments, tab_residents = st.tabs(["💰 Maintenance Payments", "🏠 Flat & Tenant DB"])
 
-            if st.session_state.role == "admin":
-                flat_file = st.file_uploader("📥 Bulk Upload Flat & Tenant Details (.xls / .xlsx)", type=["xls", "xlsx"], key="flat_upload")
-            else:
-                flat_file = None
-                st.info("🔒 You have view-only access to the Flat & Tenant Database. Only Admins can upload changes.")
-
+    with tab_payments:
+        st.markdown("### 📥 Bulk Maintenance Payments")
+        st.info("Upload an Excel file containing parsed maintenance records from your offline tracker.")
+        
+        pay_file = st.file_uploader("Upload Resident Payments (.xls / .xlsx)", type=["xls", "xlsx"], key="payment_upload")
+        
+        if pay_file is not None:
             try:
-                df_flat_db = pd.read_sql("SELECT * FROM flat_details", con=engine)
-            except Exception:
-                df_flat_db = pd.DataFrame(columns=[
-                    "Flat No", "Owner Name", "Rented Status", "Tenant Name", "Flat Type", "Area (sq ft)", "Contact Number", "Email ID"
-                ])
+                with st.spinner("Processing file..."):
+                    xl = pd.ExcelFile(pay_file)
+                    # Filter out helper sheets
+                    sheet_names = [s for s in xl.sheet_names if s.strip().lower() not in ["master", "total", "summary"]]
+                    
+                st.success(f"✅ File loaded successfully! Found {len(sheet_names)} payment sheets.")
                 
-            if flat_file is not None:
-                try:
-                    # Quick validation to prevent Payment File upload here
-                    xl_preview = pd.ExcelFile(flat_file)
-                    if len(xl_preview.sheet_names) > 50 and any('C1-' in s for s in xl_preview.sheet_names):
-                        st.error("🛑 STOP! You uploaded the **Payment / Maintenance** file here!\n\nThis upload box is ONLY for the **Tenant & Owner Database**. To upload parsed payment records, please click **'📤 Upload Payments'** in the gray Navigation Sidebar on the far left!")
-                        df_flat = df_flat_db
-                    else:
-                        df_upload = pd.read_excel(flat_file, header=None)
-                        
-                        # 1. Dynamically find the header row by looking for 'Flat No'
-                        header_idx = None
-                        for i, row in df_upload.iterrows():
-                            if row.astype(str).str.contains(r'Flat\s*No', case=False, na=False).any():
-                                header_idx = i
-                                break
+                st.markdown("---")
+                st.markdown("### 🔍 Search & Validate Payments")
+                search_flat = st.text_input("Enter Flat Number to extract (e.g., C1-1101)", placeholder="Quick search...")
+                
+                if search_flat:
+                    search_query = search_flat.strip().upper().replace(" ", "")
+                    matching_sheets = [s for s in sheet_names if search_query in s.strip().upper().replace(" ", "")]
+                    
+                    if matching_sheets:
+                        st.write(f"Found {len(matching_sheets)} matching flat(s):")
+                        parsed_sheets = {}
+                        for sheet in matching_sheets:
+                            try:
+                                df_sheet = pd.read_excel(xl, sheet_name=sheet, header=None)
                                 
-                        if header_idx is not None:
-                            df_upload.columns = df_upload.iloc[header_idx]
-                            df_upload = df_upload.iloc[header_idx + 1:].reset_index(drop=True)
-                            
-                        # 2. Map custom columns to the database schema
-                        rename_map = {}
-                        for col in df_upload.columns:
-                            col_str = str(col).strip().lower()
-                            if 'owner' in col_str:
-                                rename_map[col] = 'Owner Name'
-                            elif 'flat no' in col_str:
-                                rename_map[col] = 'Flat No'
-                            elif 'mobile' in col_str or 'contact' in col_str:
-                                rename_map[col] = 'Contact Number'
-                            elif 'tenant' in col_str:
-                                rename_map[col] = 'Tenant Name'
-                        
-                        if rename_map:
-                            df_upload.rename(columns=rename_map, inplace=True)
+                                header_idx = None
+                                start_col_idx = None
+                                
+                                def is_start_col(c):
+                                    cell_str = str(c).strip().lower()
+                                    return cell_str.startswith('year') or cell_str == 'month' or cell_str.startswith('column')
+                                
+                                for i, row in df_sheet.iterrows():
+                                    row_str = row.astype(str).str.lower().tolist()
+                                    if any(is_start_col(cell) for cell in row_str) and any(str(cell).strip().lower() == 'amount' for cell in row_str):
+                                        header_idx = i
+                                        for j, cell in enumerate(row_str):
+                                            if is_start_col(cell):
+                                                start_col_idx = j
+                                                break
+                                        break
+                                        
+                                if header_idx is not None and start_col_idx is not None:
+                                    clean_df = df_sheet.iloc[header_idx + 1:, start_col_idx : start_col_idx + 9].copy()
+                                    clean_df.columns = ["Month", "Last Month Interest", "Outstanding", "Monthly Dues", "Date", "Narration", "Amount", "Balance", "Interest"]
+                                    
+                                    clean_df = clean_df.dropna(how='all')
+                                    if "Date" in clean_df.columns:
+                                        clean_df["Date"] = pd.to_datetime(clean_df["Date"], errors='coerce').dt.strftime('%Y-%m-%d').fillna("")
+                                    if "Amount" in clean_df.columns:
+                                        clean_df["Amount"] = pd.to_numeric(clean_df["Amount"], errors='coerce').fillna(0)
+                                    
+                                    first_outstanding_val = float(clean_df.iloc[0]["Outstanding"]) if len(clean_df) > 0 else 0.0
+                                    
+                                    final_df = clean_df[["Month", "Date", "Narration", "Amount", "Outstanding"]].copy()
+                                    final_df["Amount"] = pd.to_numeric(final_df["Amount"], errors='coerce').fillna(0)
+                                    final_df["Outstanding"] = pd.to_numeric(final_df["Outstanding"], errors='coerce').fillna(0)
+                                    final_df.insert(0, "Flat Number", sheet)
+                                    final_df = final_df[final_df["Amount"] > 0].reset_index(drop=True)
+                                    
+                                    parsed_sheets[sheet] = final_df
+                                    parsed_sheets[f"__cf_{sheet}"] = first_outstanding_val
+                            except Exception as e:
+                                st.error(f"Error parsing flat {sheet}: {e}")
 
-                        # Ensure schema matches by adding missing expected columns
-                        for col in df_flat_db.columns:
-                            if col not in df_upload.columns:
-                                df_upload[col] = None
-                                
-                        # Remove trailing NaNs
-                        df_upload.dropna(subset=['Flat No'], inplace=True)
-                        
-                        # Reorder/filter to strictly match the expected DB schema
-                        df_flat = df_upload[[c for c in df_flat_db.columns if c in df_upload.columns]]
-                        st.success("✅ Tenant DB file loaded! Review the data below and click **Save Database Changes** to safely write this into MySQL.")
-                except Exception as e:
-                    st.error(f"Error reading uploaded file: {e}")
-                    df_flat = df_flat_db
+                        approve_all = st.checkbox("Select All Payments", key="approve_all_bulk")
+                        all_edited = {}
+                        for sheet, final_df in parsed_sheets.items():
+                            if sheet.startswith("__cf_"): continue
+                            final_df.insert(0, "Approved", approve_all)
+                            edited_df = st.data_editor(final_df, use_container_width=True, hide_index=True, key=f"bulk_pay_{sheet}")
+                            all_edited[sheet] = edited_df
+
+                        if st.button("💾 Save to Database", type="primary"):
+                            rows_to_save = [df[df["Approved"]].drop(columns=["Approved"]) for df in all_edited.values()]
+                            combined = pd.concat(rows_to_save, ignore_index=True) if rows_to_save else pd.DataFrame()
+                            if not combined.empty:
+                                try:
+                                    with engine.connect() as conn:
+                                        inserted = 0
+                                        for _, row in combined.iterrows():
+                                            res = conn.execute(sqlalchemy.text("""
+                                                INSERT IGNORE INTO payment_history 
+                                                (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`)
+                                                VALUES (:flat, :month, :date, :narration, :amount, :outstanding)
+                                            """), {
+                                                "flat": row["Flat Number"], "month": row["Month"], "date": str(row["Date"]),
+                                                "narration": row["Narration"], "amount": float(row["Amount"]), "outstanding": float(row["Outstanding"])
+                                            })
+                                            if res.rowcount > 0: inserted += 1
+                                        conn.commit()
+                                    st.success(f"✅ {inserted} payments saved!")
+                                except Exception as e:
+                                    st.error(f"DB Error: {e}")
+            except Exception as e:
+                st.error(f"File Error: {e}")
+
+    with tab_residents:
+        st.markdown("### 🏠 Tenant & Owner Database")
+        if st.session_state.role == "admin":
+            flat_file = st.file_uploader("📥 Bulk Upload Resident Details (.xls / .xlsx)", type=["xls", "xlsx"], key="bulk_flat_upload")
+        else:
+            st.info("🔒 Only Admins can upload Tenant data.")
+            flat_file = None
+
+        try:
+            df_flat_db = pd.read_sql("SELECT * FROM flat_details", con=engine)
+            if flat_file:
+                df_upload = pd.read_excel(flat_file, header=None)
+                # ... reuse the dynamic header mapping logic ...
+                header_idx = None
+                for i, row in df_upload.iterrows():
+                    if row.astype(str).str.contains(r'Flat\s*No', case=False, na=False).any():
+                        header_idx = i; break
+                if header_idx is not None:
+                    df_upload.columns = df_upload.iloc[header_idx]
+                    df_upload = df_upload.iloc[header_idx + 1:].reset_index(drop=True)
+                
+                # Basic schema matching (kept concise)
+                for col in df_flat_db.columns:
+                    if col not in df_upload.columns: df_upload[col] = None
+                df_flat = df_upload[df_flat_db.columns].dropna(subset=['Flat No'])
             else:
                 df_flat = df_flat_db
-                
-            edited_df = st.data_editor(
-                df_flat, 
-                num_rows="dynamic" if st.session_state.role == "admin" else "fixed",
-                disabled=st.session_state.role != "admin",
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Rented Status": st.column_config.SelectboxColumn("Rented Status", options=["Yes", "No"], required=True),
-                    "Flat Type": st.column_config.SelectboxColumn("Flat Type", options=["1 BHK", "2 BHK", "3 BHK", "4 BHK", "Penthouse"]),
-                }
-            )
-            
-            if st.session_state.role == "admin":
-                if st.button("💾 Save Database Changes", type="primary"):
-                    with st.spinner("Saving to MySQL..."):
-                        edited_df.to_sql(name="flat_details", con=engine, if_exists="replace", index=False)
-                    st.success("✅ Changes successfully saved to `society_plus` database!")
+
+            edited_df = st.data_editor(df_flat, num_rows="dynamic" if st.session_state.role=="admin" else "fixed", use_container_width=True, hide_index=True)
+            if st.session_state.role == "admin" and st.button("💾 Save Resident DB", type="primary"):
+                edited_df.to_sql("flat_details", con=engine, if_exists="replace", index=False)
+                st.success("✅ Database updated!")
         except Exception as e:
-            st.error(f"❌ Failed to connect to MySQL. Ensure your credentials in the sidebar are correct. Error: {e}")
+            st.error(f"Database sync error: {e}")
+
+# --- Flat Management Menu ---
+elif app_mode == "🏢 Flat Management":
+    st.markdown("---")
+    # Content remains, but the tab_upload logic is removed below as it's been centralized
 
     with tab_calc:
         st.markdown("### 🧮 Maintenance Ledger & Penalty Calculator")
         st.markdown('<p class="info-text">Simulate and calculate resident maintenance dues with automatic penalty and overpayment forwarding logic.</p>', unsafe_allow_html=True)
         
-        society_settings = load_settings()
-        
         # Pull configuration silently from Global Settings
-        base_dues = float(society_settings["base_maintenance"])
+        society_settings = load_settings()
+        owner_dues = float(society_settings.get("base_maintenance", 2500.0))
+        tenant_dues = float(society_settings.get("tenant_maintenance", 3000.0))
         penalty_apr = float(society_settings.get("penalty_apr", 18.0))
-        grace_day = int(society_settings["grace_period_day"])
+        grace_day = int(society_settings.get("grace_period_day", 10))
         
+        # Determine current fee based on Rented Status
+        base_dues = owner_dues
+        is_rented_bool = False
+        try:
+            with get_engine().connect() as _conn_chk:
+                _rs_check = _conn_chk.execute(sqlalchemy.text(
+                    "SELECT `Rented Status` FROM flat_details WHERE `Flat No` = :f"
+                ), {"f": selected_flat}).scalar()
+                if str(_rs_check).strip().upper() in ["Y", "YES"]:
+                    base_dues = tenant_dues
+                    is_rented_bool = True
+        except:
+            pass
+            
         monthly_interest_rate = penalty_apr / 12 / 100
-        
-        st.info(f"⚙️ **Active Global Policy:** {penalty_apr}% Annual Penalty applied to unpaid dues after day {grace_day} of each month.")
+            
+        st.info(f"⚙️ **Active Policy for {selected_flat}:** Using {'Tenant' if is_rented_bool else 'Owner'} fee (₹{base_dues:,.0f}/mo). Penalty {penalty_apr}% after day {grace_day}.")
         # selected_flat is the shared selector defined above the tabs
         if selected_flat == "-- Select Flat --":
             st.info("👆 Select a flat from the dropdown above to view the maintenance ledger.")
@@ -1010,7 +1150,15 @@ elif app_mode == "🏢 Flat Management":
         fy_start_options = list(range(2023, current_cal_year + 1))
         fy_labels = [f"{y}-{str(y+1)[-2:]}" for y in fy_start_options]
         all_fy_options = ["All Years"] + fy_labels
-        default_fy_idx = 1  # Default to 2023-24 (index 1 since All Years is index 0)
+        
+        # Calculate current FY index
+        _now_dt = pd.Timestamp.now()
+        _cur_fy_start = _now_dt.year if _now_dt.month >= 4 else _now_dt.year - 1
+        try:
+            default_fy_idx = fy_start_options.index(_cur_fy_start) + 1 # +1 because of "All Years"
+        except:
+            default_fy_idx = 1
+            
         selected_fy_label = st.selectbox("📅 Select Financial Year", all_fy_options, index=default_fy_idx)
         all_years_mode = selected_fy_label == "All Years"
         selected_year = fy_start_options[fy_labels.index(selected_fy_label)] if not all_years_mode else fy_start_options[0]
@@ -1124,8 +1272,9 @@ elif app_mode == "🏢 Flat Management":
                             fy_start_dt = pd.Timestamp(year=selected_year, month=4, day=1)
                             fy_end_dt   = pd.Timestamp(year=selected_year + 1, month=3, day=31)
                             df_hist = df_hist[
-                                (df_hist['_parsed_date'] >= fy_start_dt) &
-                                (df_hist['_parsed_date'] <= fy_end_dt)
+                                (df_hist['_parsed_date'].isna()) |  # Keep rows with no date for fallback
+                                ((df_hist['_parsed_date'] >= fy_start_dt) &
+                                 (df_hist['_parsed_date'] <= fy_end_dt))
                             ].copy()
 
                         # Derive month abbreviation and year from the Date column
@@ -1143,18 +1292,30 @@ elif app_mode == "🏢 Flat Management":
                             letters = re.sub(r'[^a-zA-Z]', '', s)[:3].title()
                             return letters if letters else ''
 
-                        mask_no_date = df_hist['Month_Short'].isna() | (df_hist['Month_Short'] == '')
-                        if mask_no_date.any():
-                            df_hist.loc[mask_no_date, 'Month_Short'] = df_hist.loc[mask_no_date, 'Month'].apply(parse_month_abbrev_fallback)
+                        # Normalize Month abbreviated to title case
+                        df_hist['Month_Final'] = df_hist['Month_Short'].apply(lambda x: str(x).title() if pd.notna(x) and x != '' else '')
+                        # If still missing, use the Month column with fallback parser
+                        mask_missing = df_hist['Month_Final'] == ''
+                        if mask_missing.any():
+                            df_hist.loc[mask_missing, 'Month_Final'] = df_hist.loc[mask_missing, 'Month'].apply(parse_month_abbrev_fallback)
 
-                        # Ensure Amount is numeric
-                        df_hist['Amount'] = pd.to_numeric(df_hist['Amount'], errors='coerce').fillna(0)
+                        # Extract Year from the Month string if possible for records where Date is invalid
+                        def extract_year_fallback(row):
+                            if pd.notna(row['Year_Num']): return int(row['Year_Num'])
+                            import re
+                            # Look for 4 digits in the Month column
+                            match = re.search(r'\d{4}', str(row['Month']))
+                            if match: return int(match.group())
+                            # Fallback to current year if absolutely unknown
+                            return pd.Timestamp.now().year
+
+                        df_hist['Year_Final'] = df_hist.apply(extract_year_fallback, axis=1)
 
                         # Sum amounts per (Month, Year) and map to calc_df rows
-                        monthly_totals = df_hist.groupby(['Month_Short', 'Year_Num'])['Amount'].sum().reset_index()
+                        monthly_totals = df_hist.groupby(['Month_Final', 'Year_Final'])['Amount'].sum().reset_index()
 
                         for _, row in monthly_totals.iterrows():
-                            label = f"{row['Month_Short']} {int(row['Year_Num'])}"
+                            label = f"{row['Month_Final']} {int(row['Year_Final'])}"
                             idx = st.session_state.calc_df[st.session_state.calc_df['Month'] == label].index
                             if not idx.empty:
                                 st.session_state.calc_df.loc[idx[0], 'Payment Received'] = float(row['Amount'])
@@ -1162,7 +1323,7 @@ elif app_mode == "🏢 Flat Management":
                         # Build per-month transaction details for multi-payment detection
                         txns_by_month = {}
                         for _, r in df_hist.iterrows():
-                            lbl = f"{r['Month_Short']} {int(r['Year_Num'])}"
+                            lbl = f"{r['Month_Final']} {int(r['Year_Final'])}"
                             txns_by_month.setdefault(lbl, []).append({
                                 "Amount": float(r.get("Amount", 0)),
                                 "Date": str(r.get("Date", "") or ""),
@@ -1177,9 +1338,11 @@ elif app_mode == "🏢 Flat Management":
                                 cnt = len(txns)
                                 st.session_state.calc_df.loc[idx[0], "💳 Txns"] = f"🔢 {cnt}" if cnt > 1 else ""
 
-
-                except Exception:
-                    pass
+                except Exception as e:
+                    st.error(f"⚠️ Error loading ledger for {selected_flat}: {e}")
+                    import traceback
+                    with st.expander("Debug details"):
+                        st.code(traceback.format_exc())
             
             st.session_state.calc_key += 1
             st.rerun()
@@ -1470,7 +1633,8 @@ elif app_mode == "🏢 Flat Management":
                         delta_color="inverse",
                     )
                 with m4:
-                    total_obligation = final_total_obligation + carry_forward
+                    # closing_principal already includes carry_forward_input
+                    total_obligation = final_principal + final_penalties
                     st.metric(
                         "Final Total Obligation",
                         f"₹{total_obligation:,.2f}",
@@ -1799,9 +1963,10 @@ elif app_mode == "⚙️ Settings":
     with st.form("settings_form"):
         col1, col2 = st.columns(2)
         with col1:
-            new_base = st.number_input("Base Monthly Maintenance (₹)", min_value=0.0, value=float(current_settings["base_maintenance"]), step=100.0)
+            new_base = st.number_input("Base Monthly Maintenance (Owner) (₹)", min_value=0.0, value=float(current_settings["base_maintenance"]), step=100.0)
             new_grace = st.number_input("Penalty Applied After Day of Month", min_value=1, max_value=31, value=int(current_settings["grace_period_day"]), help="e.g., If set to 10, penalties apply after the 10th of the month.")
         with col2:
+            new_tenant_maint = st.number_input("Tenant Monthly Maintenance (₹)", min_value=0.0, value=float(current_settings.get("tenant_maintenance", 3000.0)), step=100.0)
             new_penalty_apr = st.number_input("Late Payment Annual Interest Rate (%)", min_value=0.0, value=float(current_settings.get("penalty_apr", 18.0)), step=1.0, help="Annual Percentage Rate. Will divide by 12 for monthly calculation.")
 
         st.markdown("---")
@@ -1818,6 +1983,7 @@ elif app_mode == "⚙️ Settings":
         if submitted:
             new_settings = {
                 "base_maintenance": new_base,
+                "tenant_maintenance": new_tenant_maint,
                 "penalty_apr": new_penalty_apr,
                 "grace_period_day": new_grace,
                 "gmail_sender_email": new_sender_email,
@@ -1884,7 +2050,6 @@ elif app_mode == "⚙️ Settings":
             st.error("⚠️ No Bank Reconciliation data loaded to sync.")
         else:
             try:
-                import re
                 engine = get_engine()
                 def sanitize_col(col_name):
                     name = str(col_name).strip()
@@ -1913,10 +2078,9 @@ elif app_mode == "✅ Pending Approvals":
         
     try:
         engine = get_engine()
-        import sqlalchemy as _sa
         with engine.connect() as conn:
             # Check if table exists
-            has_table = conn.execute(_sa.text(
+            has_table = conn.execute(sqlalchemy.text(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'pending_payments'"
             )).scalar() > 0
             
@@ -1978,68 +2142,94 @@ elif app_mode == "✅ Pending Approvals":
                 selection_event = st.dataframe(
                     filtered_pending_df[display_cols],
                     use_container_width=True,
-                    selection_mode="single-row",
+                    selection_mode="multi-row",
                     on_select="rerun",
                     hide_index=True
                 )
                 
-                if len(selection_event.selection.rows) > 0:
-                    selected_idx = selection_event.selection.rows[0]
-                    selected_row = filtered_pending_df.iloc[selected_idx]
+                selected_indices = selection_event.selection.rows
                 
-                    st.markdown("---")
-                    st.markdown(f"### Reviewing Payment for **{selected_row['Flat Number']}**")
+                if len(selected_indices) > 0:
+                    selected_rows = filtered_pending_df.iloc[selected_indices]
+                    total_amt = selected_rows["Amount"].sum()
                     
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.metric("Amount", f"₹{selected_row['Amount']:,.2f}")
-                        st.metric("Ledger Month", selected_row["Month"])
-                    with c2:
-                        st.metric("Payment Date", str(selected_row["Date"]))
-                        st.metric("Submitted By", selected_row["submitted_by"])
-                    with c3:
-                        st.write("**Narration / Ref:**")
-                        st.write(selected_row["Narration"] if selected_row["Narration"] else "—")
+                    st.markdown("---")
+                    st.markdown(f"### 📋 Reviewing {len(selected_rows)} selected payment(s)")
+                    
+                    c_metric1, c_metric2 = st.columns(2)
+                    with c_metric1:
+                        st.metric("Total Rows", len(selected_rows))
+                    with c_metric2:
+                        st.metric("Total Amount", f"₹{total_amt:,.2f}")
+
+                    if len(selected_rows) == 1:
+                        selected_row = selected_rows.iloc[0]
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            st.write(f"**Flat:** {selected_row['Flat Number']}")
+                            st.write(f"**Month:** {selected_row['Month']}")
+                        with c2:
+                            st.write(f"**Date:** {selected_row['Date']}")
+                            st.write(f"**By:** {selected_row['submitted_by']}")
+                        with c3:
+                            st.write("**Narration:**")
+                            st.write(selected_row["Narration"] if selected_row["Narration"] else "—")
                     
                     col_app, col_rej = st.columns(2)
                     with col_app:
-                        if st.button("✅ Approve & Move to Ledger", type="primary", use_container_width=True):
+                        btn_label = "✅ Approve Selected" if len(selected_rows) > 1 else "✅ Approve & Move to Ledger"
+                        if st.button(btn_label, type="primary", use_container_width=True):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
                             try:
                                 with engine.connect() as conn:
-                                    # Insert into payment_history with IGNORE to catch potential duplicates
-                                    result = conn.execute(_sa.text("""
-                                        INSERT IGNORE INTO payment_history 
-                                        (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
-                                        VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
-                                    """), {
-                                        "flat": selected_row["Flat Number"],
-                                        "month": selected_row["Month"],
-                                        "date": selected_row["Date"],
-                                        "narration": selected_row["Narration"],
-                                        "amount": float(selected_row["Amount"]),
-                                        "ref": selected_row["narration_ref"]
-                                    })
+                                    success_count = 0
+                                    dupe_count = 0
                                     
-                                    if result.rowcount > 0:
-                                        # Delete from pending since it successfully moved to ledger
-                                        conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
-                                        conn.commit()
-                                        st.success(f"✅ Approved! ₹{selected_row['Amount']:,.2f} added to {selected_row['Flat Number']} ledger.")
-                                        st.session_state.calc_key += 1
-                                        st.rerun()
-                                    else:
-                                        # It was skipped because of the UNIQUE KEY matching an existing DB record
-                                        st.warning(f"⚠️ Duplicate Detected: This exact payment of ₹{selected_row['Amount']:,.2f} on {selected_row['Date']} for {selected_row['Flat Number']} is already in the ledger. Please hit 'Reject & Discard'.")
+                                    for i, (_, row) in enumerate(selected_rows.iterrows()):
+                                        # Insert with IGNORE
+                                        result = conn.execute(sqlalchemy.text("""
+                                            INSERT IGNORE INTO payment_history 
+                                            (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                            VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
+                                        """), {
+                                            "flat": row["Flat Number"],
+                                            "month": row["Month"],
+                                            "date": row["Date"],
+                                            "narration": row["Narration"],
+                                            "amount": float(row["Amount"]),
+                                            "ref": row["narration_ref"]
+                                        })
+                                        
+                                        if result.rowcount > 0:
+                                            conn.execute(sqlalchemy.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(row["id"])})
+                                            success_count += 1
+                                        else:
+                                            dupe_count += 1
+                                            
+                                        # Update progress
+                                        progress_bar.progress((i + 1) / len(selected_rows))
+                                    
+                                    conn.commit()
+                                    if success_count > 0:
+                                        st.success(f"✅ Successfully approved {success_count} payment(s).")
+                                    if dupe_count > 0:
+                                        st.warning(f"⚠️ {dupe_count} duplicate(s) were skipped as they already exist in the ledger.")
+                                    
+                                    st.session_state.calc_key += 1
+                                    st.rerun()
                             except Exception as e:
-                                st.error(f"❌ Failed to approve: {e}")
+                                st.error(f"❌ Failed to process approvals: {e}")
                     
                     with col_rej:
-                        if st.button("❌ Reject & Discard", use_container_width=True):
+                        btn_rej_label = "❌ Reject Selected" if len(selected_rows) > 1 else "❌ Reject & Discard"
+                        if st.button(btn_rej_label, use_container_width=True):
                             try:
                                 with engine.connect() as conn:
-                                    conn.execute(_sa.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(selected_row["id"])})
+                                    for _, row in selected_rows.iterrows():
+                                        conn.execute(sqlalchemy.text("DELETE FROM pending_payments WHERE id = :id"), {"id": int(row["id"])})
                                     conn.commit()
-                                st.warning(f"🗑️ Payment submission discarded.")
+                                st.warning(f"🗑️ {len(selected_rows)} payment submission(s) discarded.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Failed to reject: {e}")
@@ -2061,7 +2251,6 @@ elif app_mode == "👥 User Management":
     with tab_list:
         try:
             engine = get_engine()
-            import sqlalchemy as _sa
             with engine.connect() as conn:
                 users_df = pd.read_sql("SELECT username, role FROM app_users", con=conn)
                 
@@ -2085,7 +2274,7 @@ elif app_mode == "👥 User Management":
                 else:
                     try:
                         with engine.connect() as conn:
-                            conn.execute(_sa.text("DELETE FROM app_users WHERE username = :u"), {"u": del_user})
+                            conn.execute(sqlalchemy.text("DELETE FROM app_users WHERE username = :u"), {"u": del_user})
                             conn.commit()
                         st.success(f"✅ User '{del_user}' was successfully removed.")
                         st.rerun()
@@ -2118,15 +2307,14 @@ elif app_mode == "👥 User Management":
                     try:
                         from passlib.hash import pbkdf2_sha256
                         engine = get_engine()
-                        import sqlalchemy as _sa
                         with engine.connect() as conn:
                             # Check if exists
-                            exists = conn.execute(_sa.text("SELECT 1 FROM app_users WHERE username = :u"), {"u": new_username}).fetchone()
+                            exists = conn.execute(sqlalchemy.text("SELECT 1 FROM app_users WHERE username = :u"), {"u": new_username}).fetchone()
                             if exists:
                                 st.error(f"❌ Username '{new_username}' already exists. Please choose another.")
                             else:
                                 hash_pwd = pbkdf2_sha256.hash(new_password)
-                                conn.execute(_sa.text(
+                                conn.execute(sqlalchemy.text(
                                     "INSERT INTO app_users (username, password_hash, role) VALUES (:u, :p, :r)"
                                 ), {"u": new_username, "p": hash_pwd, "r": new_role})
                                 conn.commit()
