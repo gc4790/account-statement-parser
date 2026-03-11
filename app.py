@@ -6,7 +6,8 @@ import sqlalchemy
 import re
 from sqlalchemy import text as _text
 
-SETTINGS_FILE = "society_settings.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(BASE_DIR, "society_settings.json")
 
 def load_settings():
     default_settings = {
@@ -22,27 +23,27 @@ def load_settings():
     }
     if os.path.exists(SETTINGS_FILE):
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 settings = json.load(f)
                 default_settings.update(settings)
-        except:
-            pass
+        except Exception as e:
+            st.error(f"Error reading Society Settings ({SETTINGS_FILE}): {e}")
     return default_settings
 
 def save_settings(settings):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
 
-DB_CONFIG_FILE = "db_config.json"
+DB_CONFIG_FILE = os.path.join(BASE_DIR, "db_config.json")
 
 def load_db_config():
     default = {"host": "localhost", "port": "3306", "user": "root", "password": "root", "database": "society_plus", "use_ssl": False}
     if os.path.exists(DB_CONFIG_FILE):
         try:
-            with open(DB_CONFIG_FILE, "r") as f:
+            with open(DB_CONFIG_FILE, "r", encoding="utf-8") as f:
                 default.update(json.load(f))
-        except:
-            pass
+        except Exception as e:
+            st.error(f"Error reading DB config: {e}")
     return default
 
 def save_db_config(cfg):
@@ -471,8 +472,8 @@ def init_auth_db():
                 conn.execute(sqlalchemy.text("INSERT INTO app_users (username, password_hash, role) VALUES ('admin', :hash, 'admin')"), {"hash": default_hash})
                 conn.commit()
     except Exception as e:
-        # Silently fail if DB isn't configured yet (allows Settings to be visible on first install if we bypass)
-        pass
+        # DB isn't configured yet or connection failed, show warning
+        st.warning(f"⚠️ Could not initialize Authentication DB (this is normal if testing locally without DB): {e}")
 
 init_auth_db()
 
