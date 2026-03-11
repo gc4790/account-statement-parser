@@ -968,7 +968,7 @@ elif app_mode == "📤 Bulk Upload":
         st.error("🔒 You do not have permission to access Bulk Uploads.")
         st.stop()
         
-    tab_payments, tab_residents = st.tabs(["💰 Maintenance Payments", "🏠 Flat & Tenant DB"])
+    tab_payments, tab_residents, tab_history = st.tabs(["💰 Maintenance Payments", "🏠 Flat & Tenant DB", "📜 History Data"])
 
     with tab_payments:
         st.markdown("### 📥 Bulk Maintenance Payments")
@@ -1107,6 +1107,58 @@ elif app_mode == "📤 Bulk Upload":
         except Exception as e:
             st.error(f"Database sync error: {e}")
 
+    with tab_history:
+        st.markdown("### 📜 Bulk Upload Owner/Tenant History")
+        st.info("Upload an Excel file with columns: `Flat No`, `Type` (Owner/Tenant), `Name`, `Contact`, `From Date`, `To Date`.")
+        
+        hist_file = st.file_uploader("📥 Upload History Data (.xls / .xlsx)", type=["xls", "xlsx"], key="bulk_hist_upload")
+        
+        if hist_file:
+            try:
+                df_h = pd.read_excel(hist_file)
+                # Normalize columns
+                df_h.columns = [str(c).strip().title() for c in df_h.columns]
+                expected = ["Flat No", "Type", "Name", "Contact", "From Date", "To Date"]
+                
+                # Check mapping
+                missing = [c for c in expected if c not in df_h.columns]
+                if missing:
+                    st.error(f"❌ Missing columns: {', '.join(missing)}")
+                else:
+                    st.dataframe(df_h.head(), use_container_width=True)
+                    if st.button("🚀 Process & Save History", type="primary"):
+                        o_count = 0
+                        t_count = 0
+                        with engine.begin() as conn:
+                            for _, row in df_h.iterrows():
+                                h_type = str(row.get("Type", "")).strip().lower()
+                                f_no = str(row.get("Flat No", "")).strip()
+                                name = str(row.get("Name", "")).strip()
+                                
+                                if not f_no or not name: continue
+                                
+                                if "owner" in h_type:
+                                    conn.execute(sqlalchemy.text("""
+                                        INSERT INTO owner_history (flat_no, owner_name, contact, from_date, to_date)
+                                        VALUES (:f, :n, :c, :fd, :td)
+                                    """), {
+                                        "f": f_no, "n": name, "c": row.get("Contact"),
+                                        "fd": row.get("From Date"), "td": row.get("To Date")
+                                    })
+                                    o_count += 1
+                                elif "tenant" in h_type:
+                                    conn.execute(sqlalchemy.text("""
+                                        INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date)
+                                        VALUES (:f, :n, :c, :fd, :td)
+                                    """), {
+                                        "f": f_no, "n": name, "c": row.get("Contact"),
+                                        "fd": row.get("From Date"), "td": row.get("To Date")
+                                    })
+                                    t_count += 1
+                        st.success(f"✅ Finished! Added {o_count} owner records and {t_count} tenant records.")
+            except Exception as e:
+                st.error(f"Error processing history file: {e}")
+
 # --- Flat Management Menu ---
 elif app_mode == "🏢 Flat Management":
     st.markdown("---")
@@ -1132,6 +1184,21 @@ elif app_mode == "🏢 Flat Management":
                 # Fetch data
                 df_owner = pd.read_sql(f"SELECT owner_name, contact, from_date, to_date FROM owner_history WHERE flat_no = '{selected_flat}'", con=engine)
                 
+                if df_owner.empty:
+                    if st.button("📋 Populate from Current Resident DB", key="btn_pop_owner"):
+                        try:
+                            df_curr = pd.read_sql(f"SELECT `Owner Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
+                            if not df_curr.empty:
+                                new_row = pd.DataFrame([{
+                                    "owner_name": df_curr.iloc[0]["Owner Name"],
+                                    "contact": df_curr.iloc[0]["Contact Number"],
+                                    "from_date": "Current",
+                                    "to_date": ""
+                                }])
+                                df_owner = pd.concat([df_owner, new_row], ignore_index=True)
+                                st.rerun()
+                        except: pass
+                
                 edited_owner = st.data_editor(
                     df_owner, 
                     num_rows="dynamic", 
@@ -1146,21 +1213,34 @@ elif app_mode == "🏢 Flat Management":
                     }
                 )
                 
+                do_sync_o = st.checkbox("🔄 Sync latest owner entry to Main Database", value=True, help="Update the 'Owner Name' in the resident database with the last entry in this table.")
+                
                 if st.button("💾 Save Owner History", key="btn_save_owner_hist"):
                     with engine.begin() as conn:
                         conn.execute(sqlalchemy.text("DELETE FROM owner_history WHERE flat_no = :f"), {"f": selected_flat})
+                        last_owner = None
+                        last_contact = None
                         for _, row in edited_owner.iterrows():
-                            if str(row.get("owner_name", "")).strip():
+                            o_name = str(row.get("owner_name", "")).strip()
+                            if o_name:
                                 conn.execute(sqlalchemy.text("""
                                     INSERT INTO owner_history (flat_no, owner_name, contact, from_date, to_date)
                                     VALUES (:f, :n, :c, :fd, :td)
                                 """), {
                                     "f": selected_flat,
-                                    "n": row.get("owner_name"),
+                                    "n": o_name,
                                     "c": row.get("contact"),
                                     "fd": row.get("from_date"),
                                     "td": row.get("to_date")
                                 })
+                                last_owner = o_name
+                                last_contact = row.get("contact")
+                        
+                        if do_sync_o and last_owner:
+                            conn.execute(sqlalchemy.text("""
+                                UPDATE flat_details SET `Owner Name` = :n, `Contact Number` = :c WHERE `Flat No` = :f
+                            """), {"n": last_owner, "c": last_contact, "f": selected_flat})
+                            
                     st.success("✅ Owner history updated!")
                     st.rerun()
             except Exception as e:
@@ -1188,6 +1268,21 @@ elif app_mode == "🏢 Flat Management":
                 # Fetch data
                 df_tenant = pd.read_sql(f"SELECT tenant_name, contact, from_date, to_date FROM tenant_history WHERE flat_no = '{selected_flat}'", con=engine)
                 
+                if df_tenant.empty:
+                    if st.button("📋 Populate from Current Resident DB", key="btn_pop_tenant"):
+                        try:
+                            df_curr = pd.read_sql(f"SELECT `Tenant Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
+                            if not df_curr.empty:
+                                new_row = pd.DataFrame([{
+                                    "tenant_name": df_curr.iloc[0]["Tenant Name"],
+                                    "contact": df_curr.iloc[0]["Contact Number"],
+                                    "from_date": "Current",
+                                    "to_date": ""
+                                }])
+                                df_tenant = pd.concat([df_tenant, new_row], ignore_index=True)
+                                st.rerun()
+                        except: pass
+
                 edited_tenant = st.data_editor(
                     df_tenant, 
                     num_rows="dynamic", 
@@ -1202,21 +1297,32 @@ elif app_mode == "🏢 Flat Management":
                     }
                 )
                 
+                do_sync_t = st.checkbox("🔄 Sync latest tenant entry to Main Database", value=True, help="Update the 'Tenant Name' in the resident database with the last entry in this table.")
+                
                 if st.button("💾 Save Tenant History", key="btn_save_tenant_hist"):
                     with engine.begin() as conn:
                         conn.execute(sqlalchemy.text("DELETE FROM tenant_history WHERE flat_no = :f"), {"f": selected_flat})
+                        last_tenant = None
                         for _, row in edited_tenant.iterrows():
-                            if str(row.get("tenant_name", "")).strip():
+                            t_name = str(row.get("tenant_name", "")).strip()
+                            if t_name:
                                 conn.execute(sqlalchemy.text("""
                                     INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date)
                                     VALUES (:f, :n, :c, :fd, :td)
                                 """), {
                                     "f": selected_flat,
-                                    "n": row.get("tenant_name"),
+                                    "n": t_name,
                                     "c": row.get("contact"),
                                     "fd": row.get("from_date"),
                                     "td": row.get("to_date")
                                 })
+                                last_tenant = t_name
+                        
+                        if do_sync_t and last_tenant:
+                            conn.execute(sqlalchemy.text("""
+                                UPDATE flat_details SET `Tenant Name` = :n, `Rented Status` = 'Y' WHERE `Flat No` = :f
+                            """), {"n": last_tenant, "f": selected_flat})
+                            
                     st.success("✅ Tenant history updated!")
                     st.rerun()
             except Exception as e:
