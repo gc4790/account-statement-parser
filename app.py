@@ -14,6 +14,8 @@ def load_settings():
         "tenant_maintenance": 3000.0,
         "penalty_apr": 18.0,
         "grace_period_day": 10,
+        "concession_6_months": 5.0,
+        "concession_12_months": 10.0,
         "gmail_sender_email": "bhumisilveriiocwing@gmail.com",
         "brevo_login": "",
         "brevo_smtp_key": ""
@@ -49,13 +51,173 @@ def save_db_config(cfg):
 
 
 def get_engine():
-    """Create a SQLAlchemy engine from db_config.json. Enables SSL for cloud DBs like TiDB."""
+    """Create a SQLAlchemy engine. Checks Streamlit secrets first for cloud deployments, then falls back to local db_config.json."""
+    # 1. Try Streamlit Secrets First (For Cloud/Deployed Environments)
+    try:
+        if "DB_HOST" in st.secrets and "DB_USER" in st.secrets:
+            host = st.secrets["DB_HOST"]
+            user = st.secrets["DB_USER"]
+            password = st.secrets.get("DB_PASSWORD", "")
+            database = st.secrets.get("DB_NAME", "society_plus")
+            port = st.secrets.get("DB_PORT", 3306)
+            use_ssl = st.secrets.get("DB_USE_SSL", False)
+            
+            _url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+            if use_ssl:
+                return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
+            return sqlalchemy.create_engine(_url)
+    except Exception:
+        pass # Not running in a Streamlit context where secrets are available, or no secrets defined
+
+    # 2. Local Fallback (For Local Development)
     _c = load_db_config()
     _url = f"mysql+pymysql://{_c['user']}:{_c['password']}@{_c['host']}:{_c['port']}/{_c['database']}"
     if _c.get("use_ssl", False):
         return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
     return sqlalchemy.create_engine(_url)
 
+def calculate_flat_ledger(flat_no, as_of_date=None, engine=None):
+    """
+    Core engine to calculate dues, payments, and penalties for a flat.
+    Centralized so both Flat Management and Reports use the same logic.
+    """
+    if engine is None: engine = get_engine()
+    settings = load_settings()
+    
+    # 1. Base Dues & Constants
+    owner_dues = float(settings.get("base_maintenance", 2500.0))
+    tenant_dues = float(settings.get("tenant_maintenance", 3000.0))
+    penalty_apr = float(settings.get("penalty_apr", 18.0))
+    grace_day = int(settings.get("grace_period_day", 10))
+    monthly_interest_rate = penalty_apr / 12 / 100
+    PENALTY_START = pd.Timestamp(2023, 10, 1)
+    
+    # 2. Get Rented Status & Flat Details
+    base_dues = owner_dues
+    owner_name = "Unknown"
+    try:
+        with engine.connect() as _conn:
+            _df_f = pd.read_sql(sqlalchemy.text("SELECT `Owner Name`, `Rented Status` FROM flat_details WHERE `Flat No` = :f LIMIT 1"), _conn, params={"f": flat_no})
+            if not _df_f.empty:
+                owner_name = _df_f.iloc[0]["Owner Name"]
+                if str(_df_f.iloc[0]["Rented Status"]).strip().upper() in ["Y", "YES"]:
+                    base_dues = tenant_dues
+    except: pass
+    
+    # 3. Carry Forward (Opening Outstanding)
+    carry_forward = 0.0
+    try:
+        with engine.connect() as _conn:
+            _cf = _conn.execute(sqlalchemy.text("SELECT `Outstanding` FROM flat_carry_forward WHERE `Flat Number` = :f"), {"f": flat_no}).scalar()
+            if _cf is not None: 
+                carry_forward = float(_cf)
+            else:
+                _fh = pd.read_sql(f"SELECT `Outstanding` FROM payment_history WHERE `Flat Number` = '{flat_no}' ORDER BY `Date` ASC LIMIT 1", con=engine)
+                if not _fh.empty: carry_forward = float(_fh.iloc[0]["Outstanding"])
+    except: pass
+    
+    # 4. Fetch Payments
+    df_hist = pd.read_sql(f"SELECT `Amount`, `Date` FROM payment_history WHERE `Flat Number` = '{flat_no}'", con=engine)
+    df_hist['Date'] = pd.to_datetime(df_hist['Date'], errors='coerce')
+    
+    # 5. Build Month Timeline (FY starts Apr 2023)
+    if as_of_date is None: as_of_date = pd.Timestamp.now()
+    else: as_of_date = pd.to_datetime(as_of_date)
+    
+    start_date = pd.Timestamp(2023, 4, 1)
+    cur = start_date
+    months = []
+    # Loop to build month list up to as_of_date
+    while cur.replace(day=1) <= as_of_date.replace(day=1):
+        months.append(cur)
+        if cur.month == 12: cur = cur.replace(year=cur.year + 1, month=1)
+        else: cur = cur.replace(month=cur.month + 1)
+        
+    # Aggregate payments by month key (e.g. "Apr 2023")
+    payment_map = {}
+    for _, r in df_hist.dropna(subset=['Date']).iterrows():
+        m_key = r['Date'].strftime('%b %Y')
+        payment_map[m_key] = payment_map.get(m_key, 0.0) + float(r['Amount'])
+        
+    # 5.5 Fetch Concessions
+    concessions = []
+    try:
+        with engine.connect() as _conn:
+            _df_conc = pd.read_sql(sqlalchemy.text("SELECT start_month, tenure_months, discount_percent FROM flat_concessions WHERE flat_no = :f"), _conn, params={"f": flat_no})
+            for _, r in _df_conc.iterrows():
+                try:
+                    c_start = pd.to_datetime(r['start_month'], format='%b %Y')
+                    c_end = c_start + pd.DateOffset(months=int(r['tenure_months']) - 1)
+                    concessions.append({"start": c_start, "end": c_end, "discount": float(r['discount_percent'])})
+                except: pass
+    except: pass
+
+    # 6. Core Calculation Loop
+    forward_principal = carry_forward
+    accumulated_penalty = 0.0
+    total_principle_paid = 0.0
+    total_penalty_paid = 0.0
+    
+    results = []
+    for m_dt in months:
+        m_label = m_dt.strftime('%b %Y')
+        payment = payment_map.get(m_label, 0.0)
+        
+        # Apply concession
+        current_dues = base_dues
+        for c in concessions:
+            if c["start"].replace(day=1) <= m_dt.replace(day=1) <= c["end"].replace(day=1):
+                current_dues = base_dues * (1 - c["discount"] / 100.0)
+                break
+                
+        # Total Principle required this month
+        total_p_req = forward_principal + current_dues
+        
+        # Apply Payment Rule: Penalties first, then Principal
+        rem_pay = payment
+        if rem_pay > 0 and accumulated_penalty > 0:
+            if rem_pay >= accumulated_penalty:
+                total_penalty_paid += accumulated_penalty
+                rem_pay -= accumulated_penalty
+                accumulated_penalty = 0.0
+            else:
+                total_penalty_paid += rem_pay
+                accumulated_penalty -= rem_pay
+                rem_pay = 0.0
+        
+        total_principle_paid += rem_pay
+        p_after_pay = total_p_req - rem_pay
+        
+        # Penalty Calculation
+        penalty_added = 0.0
+        if p_after_pay > 0 and m_dt >= PENALTY_START:
+            is_cur_month = (m_dt.year == pd.Timestamp.now().year and m_dt.month == pd.Timestamp.now().month)
+            if not (is_cur_month and pd.Timestamp.now().day < grace_day):
+                penalty_added = p_after_pay * monthly_interest_rate
+                accumulated_penalty += penalty_added
+        
+        results.append({
+            "Month": m_label,
+            "Opening Principal": forward_principal,
+            "Base Dues": base_dues,
+            "Payment": payment,
+            "New Penalty": penalty_added,
+            "Closing Principal": p_after_pay,
+            "Accumulated Penalty": accumulated_penalty,
+            "Total Obligation": p_after_pay + accumulated_penalty
+        })
+        forward_principal = p_after_pay
+        
+    return {
+        "flat_no": flat_no,
+        "owner_name": owner_name,
+        "total_principle_paid": total_principle_paid,
+        "total_penalty_paid": total_penalty_paid,
+        "closing_principal": forward_principal,
+        "accumulated_penalty": accumulated_penalty,
+        "total_obligation": forward_principal + accumulated_penalty,
+        "results": results
+    }
 
 def send_payment_receipt(to_email, flat_no, owner_name, fy_label, res_df, carry_forward, brevo_login, brevo_smtp_key, from_email="bhumisilveriiocwing@gmail.com"):
     """Sends an HTML payment receipt via Brevo SMTP relay."""
@@ -371,6 +533,7 @@ st.sidebar.markdown("## 🧭 Navigation")
 nav_options = ["🔍 Transaction Search", "🏢 Flat Management"]
 if st.session_state.role in ["admin", "manager"]:
     nav_options.append("📤 Bulk Upload")
+    nav_options.append("📊 Report")
 if st.session_state.role == "admin":
     nav_options.append("✅ Pending Approvals")
     nav_options.append("👥 User Management")
@@ -458,7 +621,7 @@ elif app_mode == "🏢 Flat Management":
         pass
     selected_flat = st.selectbox("🏠 Select Flat", ["-- Select Flat --"] + _flat_list_shared, key="shared_flat_selector")
 
-    tab_search, tab_owner_hist, tab_tenant_hist, tab_calc = st.tabs(["🔍 Search Flat Details", "📜 Owner History", "👥 Tenant History", "🧮 Maintenance Calculator"])
+    tab_search, tab_owner_hist, tab_tenant_hist, tab_concessions, tab_calc = st.tabs(["🔍 Search Flat Details", "📜 Owner History", "👥 Tenant History", "🎁 Concessions", "🧮 Maintenance Calculator"])
 
 
     with tab_search:
@@ -634,34 +797,73 @@ if app_mode == "🔍 Transaction Search":
     st.markdown('<p class="info-text" style="font-size: 0.9rem;">View statements or reconciliations. Navigate the tabs below.</p>', unsafe_allow_html=True)
     
     # State variable for the selected dataframe to pass to the preview section
-    selected_tx_df = None
+    selected_tx_df = pd.DataFrame()
     
-    tab1, tab2 = st.tabs(["📊 Account Statement Records", "🏦 Bank Reconciliation Status"])
+    tab_credit, tab_debit, tab_rec = st.tabs(["📈 Credit (Deposits)", "📉 Debit (Withdrawals)", "🏦 Bank Reconciliation Status"])
     
-    with tab1:
-        if len(filtered_df_stmt) > 0:
-            st.info("💡 **Select one or more rows** below to preview and submit them for Admin approval.")
-            max_rows = min(len(filtered_df_stmt), 500)
+    with tab_credit:
+        # Filter for rows where Deposit column has a value > 0
+        df_credit = pd.DataFrame()
+        if len(filtered_df_stmt) > 0 and 'Deposit' in filtered_df_stmt.columns:
+            # Convert Deposit to float to filter safely
+            deposit_vals = pd.to_numeric(filtered_df_stmt['Deposit'], errors='coerce').fillna(0)
+            df_credit = filtered_df_stmt[deposit_vals > 0]
             
-            selection_stmt = st.dataframe(
-                filtered_df_stmt.head(max_rows),
+        if len(df_credit) > 0:
+            st.info("💡 **Select one or more rows** below to preview and submit them for Admin approval.")
+            max_rows = min(len(df_credit), 500)
+            
+            selection_credit = st.dataframe(
+                df_credit.head(max_rows),
                 use_container_width=True,
                 selection_mode="multi-row",
                 on_select="rerun",
                 hide_index=True,
-                height=400
+                height=400,
+                key="sel_credit"
             )
             
-            if len(selection_stmt.selection.rows) > 0:
-                selected_indices = selection_stmt.selection.rows
-                selected_tx_df = filtered_df_stmt.head(max_rows).iloc[selected_indices].copy()
+            if len(selection_credit.selection.rows) > 0:
+                selected_indices = selection_credit.selection.rows
+                selected_tx_df = pd.concat([selected_tx_df, df_credit.head(max_rows).iloc[selected_indices].copy()])
                 
-            if len(filtered_df_stmt) > 500:
-                st.caption(f"Showing first 500 of {len(filtered_df_stmt)} statement records.")
+            if len(df_credit) > 500:
+                st.caption(f"Showing first 500 of {len(df_credit)} credit records.")
         else:
-            st.warning("No Account Statement records found matching your query.")
+            st.warning("No Credit (Deposit) records found matching your query.")
+            
+    with tab_debit:
+        # Filter for rows where Withdrawal column has a value > 0
+        df_debit = pd.DataFrame()
+        if len(filtered_df_stmt) > 0 and 'Withdrawal' in filtered_df_stmt.columns:
+            # Convert Withdrawal to float to filter safely
+            withdrawal_vals = pd.to_numeric(filtered_df_stmt['Withdrawal'], errors='coerce').fillna(0)
+            df_debit = filtered_df_stmt[withdrawal_vals > 0]
+            
+        if len(df_debit) > 0:
+            st.info("💡 **Select one or more rows** below to preview and submit them for Admin approval.")
+            max_rows = min(len(df_debit), 500)
+            
+            selection_debit = st.dataframe(
+                df_debit.head(max_rows),
+                use_container_width=True,
+                selection_mode="multi-row",
+                on_select="rerun",
+                hide_index=True,
+                height=400,
+                key="sel_debit"
+            )
+            
+            if len(selection_debit.selection.rows) > 0:
+                selected_indices = selection_debit.selection.rows
+                selected_tx_df = pd.concat([selected_tx_df, df_debit.head(max_rows).iloc[selected_indices].copy()])
+                
+            if len(df_debit) > 500:
+                st.caption(f"Showing first 500 of {len(df_debit)} debit records.")
+        else:
+            st.warning("No Debit (Withdrawal) records found matching your query.")
     
-    with tab2:
+    with tab_rec:
         if len(filtered_df_rec) > 0:
             st.dataframe(
                 filtered_df_rec,
@@ -1099,6 +1301,10 @@ elif app_mode == "📤 Bulk Upload":
                 df_flat = df_upload[df_flat_db.columns].dropna(subset=['Flat No'])
             else:
                 df_flat = df_flat_db
+                
+            # Prevent float mapping issues for Contact Number column
+            if 'Contact Number' in df_flat.columns:
+                df_flat['Contact Number'] = df_flat['Contact Number'].astype(str).replace('nan', '')
 
             edited_df = st.data_editor(df_flat, num_rows="dynamic" if st.session_state.role in ["admin", "manager"] else "fixed", use_container_width=True, hide_index=True)
             if st.session_state.role in ["admin", "manager"] and st.button("💾 Save Resident DB", type="primary"):
@@ -1129,6 +1335,13 @@ elif app_mode == "📤 Bulk Upload":
                     if st.button("🚀 Process & Save History", type="primary"):
                         o_count = 0
                         t_count = 0
+                        try:
+                            with engine.connect() as _c:
+                                _c.execute(sqlalchemy.text("ALTER TABLE tenant_history ADD COLUMN rent_agreement_provided VARCHAR(10) DEFAULT 'No'"))
+                                _c.commit()
+                        except:
+                            pass
+                            
                         with engine.begin() as conn:
                             for _, row in df_h.iterrows():
                                 h_type = str(row.get("Type", "")).strip().lower()
@@ -1148,11 +1361,12 @@ elif app_mode == "📤 Bulk Upload":
                                     o_count += 1
                                 elif "tenant" in h_type:
                                     conn.execute(sqlalchemy.text("""
-                                        INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date)
-                                        VALUES (:f, :n, :c, :fd, :td)
+                                        INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date, rent_agreement_provided)
+                                        VALUES (:f, :n, :c, :fd, :td, :ra)
                                     """), {
                                         "f": f_no, "n": name, "c": row.get("Contact"),
-                                        "fd": row.get("From Date"), "td": row.get("To Date")
+                                        "fd": row.get("From Date"), "td": row.get("To Date"),
+                                        "ra": "No"
                                     })
                                     t_count += 1
                         st.success(f"✅ Finished! Added {o_count} owner records and {t_count} tenant records.")
@@ -1185,19 +1399,24 @@ elif app_mode == "🏢 Flat Management":
                 df_owner = pd.read_sql(f"SELECT owner_name, contact, from_date, to_date FROM owner_history WHERE flat_no = '{selected_flat}'", con=engine)
                 
                 if df_owner.empty:
-                    if st.button("📋 Populate from Current Resident DB", key="btn_pop_owner"):
-                        try:
-                            df_curr = pd.read_sql(f"SELECT `Owner Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
-                            if not df_curr.empty:
+                    try:
+                        df_curr = pd.read_sql(f"SELECT `Owner Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
+                        if not df_curr.empty:
+                            o_name = str(df_curr.iloc[0]["Owner Name"]).strip()
+                            if o_name and o_name.lower() not in ['nan', 'none']:
                                 new_row = pd.DataFrame([{
                                     "owner_name": df_curr.iloc[0]["Owner Name"],
                                     "contact": df_curr.iloc[0]["Contact Number"],
-                                    "from_date": "Current",
-                                    "to_date": ""
+                                    "from_date": "2023-04",
+                                    "to_date": "Current"
                                 }])
                                 df_owner = pd.concat([df_owner, new_row], ignore_index=True)
-                                st.rerun()
-                        except: pass
+                    except Exception as e:
+                        st.error(f"Failed to auto-populate owner: {e}")
+                
+                # Double-ensure schema matches TextColumn requirements right before rendering
+                if 'contact' in df_owner.columns:
+                    df_owner['contact'] = df_owner['contact'].astype(str).replace('nan', '').replace('None', '')
                 
                 edited_owner = st.data_editor(
                     df_owner, 
@@ -1264,24 +1483,36 @@ elif app_mode == "🏢 Flat Management":
                         )
                     """))
                     conn.commit()
+                    # Add rent agreement column for older tables
+                    try:
+                        conn.execute(sqlalchemy.text("ALTER TABLE tenant_history ADD COLUMN rent_agreement_provided VARCHAR(10) DEFAULT 'No'"))
+                        conn.commit()
+                    except:
+                        pass
                 
                 # Fetch data
-                df_tenant = pd.read_sql(f"SELECT tenant_name, contact, from_date, to_date FROM tenant_history WHERE flat_no = '{selected_flat}'", con=engine)
+                df_tenant = pd.read_sql(f"SELECT tenant_name, contact, from_date, to_date, rent_agreement_provided FROM tenant_history WHERE flat_no = '{selected_flat}'", con=engine)
                 
                 if df_tenant.empty:
-                    if st.button("📋 Populate from Current Resident DB", key="btn_pop_tenant"):
-                        try:
-                            df_curr = pd.read_sql(f"SELECT `Tenant Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
-                            if not df_curr.empty:
+                    try:
+                        df_curr = pd.read_sql(f"SELECT `Tenant Name`, `Contact Number` FROM flat_details WHERE `Flat No` = '{selected_flat}' LIMIT 1", con=engine)
+                        if not df_curr.empty:
+                            t_name = str(df_curr.iloc[0]["Tenant Name"]).strip()
+                            if t_name and t_name.lower() not in ['nan', 'none']:
                                 new_row = pd.DataFrame([{
                                     "tenant_name": df_curr.iloc[0]["Tenant Name"],
                                     "contact": df_curr.iloc[0]["Contact Number"],
-                                    "from_date": "Current",
-                                    "to_date": ""
+                                    "from_date": "2023-04",
+                                    "to_date": "Current",
+                                    "rent_agreement_provided": "No"
                                 }])
                                 df_tenant = pd.concat([df_tenant, new_row], ignore_index=True)
-                                st.rerun()
-                        except: pass
+                    except Exception as e:
+                        st.error(f"Failed to auto-populate tenant: {e}")
+
+                # Double-ensure schema matches TextColumn requirements right before rendering
+                if 'contact' in df_tenant.columns:
+                    df_tenant['contact'] = df_tenant['contact'].astype(str).replace('nan', '').replace('None', '')
 
                 edited_tenant = st.data_editor(
                     df_tenant, 
@@ -1293,7 +1524,8 @@ elif app_mode == "🏢 Flat Management":
                         "tenant_name": st.column_config.TextColumn("Tenant Name", required=True),
                         "contact": st.column_config.TextColumn("Contact"),
                         "from_date": st.column_config.TextColumn("From Date"),
-                        "to_date": st.column_config.TextColumn("To Date")
+                        "to_date": st.column_config.TextColumn("To Date"),
+                        "rent_agreement_provided": st.column_config.SelectboxColumn("Rent Agreement Provided?", options=["Yes", "No"], default="No", required=True)
                     }
                 )
                 
@@ -1307,14 +1539,15 @@ elif app_mode == "🏢 Flat Management":
                             t_name = str(row.get("tenant_name", "")).strip()
                             if t_name:
                                 conn.execute(sqlalchemy.text("""
-                                    INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date)
-                                    VALUES (:f, :n, :c, :fd, :td)
+                                    INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date, rent_agreement_provided)
+                                    VALUES (:f, :n, :c, :fd, :td, :ra)
                                 """), {
                                     "f": selected_flat,
                                     "n": t_name,
                                     "c": row.get("contact"),
                                     "fd": row.get("from_date"),
-                                    "td": row.get("to_date")
+                                    "td": row.get("to_date"),
+                                    "ra": row.get("rent_agreement_provided", "No")
                                 })
                                 last_tenant = t_name
                         
@@ -1327,6 +1560,75 @@ elif app_mode == "🏢 Flat Management":
                     st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
+
+    with tab_concessions:
+        st.markdown(f"### 🎁 Maintenance Concessions for {selected_flat}")
+        st.info("Manage advance payment discounts for this flat. Discounts apply to Base Dues.")
+        
+        if selected_flat != "-- Select Flat --":
+            try:
+                engine = get_engine()
+                # Ensure table exists
+                with engine.connect() as conn:
+                    conn.execute(sqlalchemy.text("""
+                        CREATE TABLE IF NOT EXISTS flat_concessions (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            flat_no VARCHAR(50),
+                            start_month VARCHAR(20),
+                            tenure_months INT,
+                            discount_percent DOUBLE
+                        )
+                    """))
+                    conn.commit()
+                
+                # Add New Concession Form
+                if st.session_state.role in ["admin", "manager"]:
+                    with st.expander("➕ Add New Concession", expanded=True):
+                        with st.form("add_concession_form"):
+                            c1, c2, c3 = st.columns(3)
+                            
+                            cur_settings = load_settings()
+                            def_6 = float(cur_settings.get("concession_6_months", 5.0))
+                            def_12 = float(cur_settings.get("concession_12_months", 10.0))
+                            
+                            with c1:
+                                import datetime
+                                now = datetime.datetime.now()
+                                default_start = now.strftime("%b %Y")
+                                c_start = st.text_input("Start Month (e.g. Apr 2024)", value=default_start)
+                            with c2:
+                                c_tenure = st.selectbox("Tenure", [6, 12], format_func=lambda x: f"{x} Months")
+                            with c3:
+                                c_discount = st.number_input("Discount (%)", min_value=0.0, max_value=100.0, step=1.0, value=def_6 if c_tenure == 6 else def_12)
+                                
+                            if st.form_submit_button("💾 Save Concession", type="primary"):
+                                with engine.begin() as conn:
+                                    conn.execute(sqlalchemy.text("""
+                                        INSERT INTO flat_concessions (flat_no, start_month, tenure_months, discount_percent)
+                                        VALUES (:f, :sm, :tm, :dp)
+                                    """), {"f": selected_flat, "sm": c_start, "tm": c_tenure, "dp": c_discount})
+                                st.success("✅ Concession added!")
+                                st.rerun()
+
+                # View existing concessions
+                df_conc = pd.read_sql(f"SELECT id, start_month, tenure_months, discount_percent FROM flat_concessions WHERE flat_no = '{selected_flat}'", con=engine)
+                
+                if not df_conc.empty:
+                    df_conc["discount_percent"] = df_conc["discount_percent"].apply(lambda x: f"{x}%")
+                    st.dataframe(df_conc, use_container_width=True, hide_index=True)
+                    
+                    if st.session_state.role in ["admin", "manager"]:
+                        del_id = st.selectbox("Select ID to delete", df_conc["id"].tolist())
+                        if st.button("🗑️ Delete Selected Concession"):
+                            with engine.begin() as conn:
+                                conn.execute(sqlalchemy.text("DELETE FROM flat_concessions WHERE id = :i"), {"i": del_id})
+                            st.success("Deleted!")
+                            st.rerun()
+                else:
+                    st.info("No concessions found for this flat.")
+                    
+            except Exception as e:
+                st.error(f"Error managing concessions: {e}")
 
     with tab_calc:
         st.markdown("### 🧮 Maintenance Ledger & Penalty Calculator")
@@ -1457,9 +1759,36 @@ elif app_mode == "🏢 Flat Management":
 
             months_with_year = [f"{m} {y}" for m, y in fy_months]
             num_months = len(fy_months)
+            
+            # Apply concessions to base dues for UI
+            concessions = []
+            try:
+                _eng_c = get_engine()
+                with _eng_c.connect() as _conn:
+                    _df_conc = pd.read_sql(sqlalchemy.text("SELECT start_month, tenure_months, discount_percent FROM flat_concessions WHERE flat_no = :f"), _conn, params={"f": selected_flat})
+                    for _, r in _df_conc.iterrows():
+                        try:
+                            c_start = pd.to_datetime(r['start_month'], format='%b %Y')
+                            c_end = c_start + pd.DateOffset(months=int(r['tenure_months']) - 1)
+                            concessions.append({"start": c_start, "end": c_end, "discount": float(r['discount_percent'])})
+                        except: pass
+            except: pass
+            
+            dues_list = []
+            for m_str in months_with_year:
+                cur_dues = base_dues
+                try:
+                    m_dt = pd.to_datetime(m_str, format='%b %Y')
+                    for c in concessions:
+                        if c["start"].replace(day=1) <= m_dt.replace(day=1) <= c["end"].replace(day=1):
+                            cur_dues = base_dues * (1 - c["discount"] / 100.0)
+                            break
+                except: pass
+                dues_list.append(cur_dues)
+                
             st.session_state.calc_df = pd.DataFrame({
                 "Month": months_with_year,
-                "Base Dues": [base_dues] * num_months,
+                "Base Dues": dues_list,
                 "Payment Received": [0.0] * num_months,
                 "💳 Txns": [""] * num_months,
             })
@@ -1563,9 +1892,34 @@ elif app_mode == "🏢 Flat Management":
             st.session_state.calc_key += 1
             st.rerun()
             
-        # Hard-sync Base Dues to the global configuration
+        # Update Base Dues with concessions dynamically in case of flat/settings change
         if "calc_df" in st.session_state:
-            st.session_state.calc_df["Base Dues"] = base_dues
+            concessions = []
+            try:
+                _eng_c = get_engine()
+                with _eng_c.connect() as _conn:
+                    _df_conc = pd.read_sql(sqlalchemy.text("SELECT start_month, tenure_months, discount_percent FROM flat_concessions WHERE flat_no = :f"), _conn, params={"f": selected_flat})
+                    for _, r in _df_conc.iterrows():
+                        try:
+                            c_start = pd.to_datetime(r['start_month'], format='%b %Y')
+                            c_end = c_start + pd.DateOffset(months=int(r['tenure_months']) - 1)
+                            concessions.append({"start": c_start, "end": c_end, "discount": float(r['discount_percent'])})
+                        except: pass
+            except: pass
+            
+            dues_list = []
+            for m_str in st.session_state.calc_df["Month"]:
+                cur_dues = base_dues
+                try:
+                    m_dt = pd.to_datetime(m_str, format='%b %Y')
+                    for c in concessions:
+                        if c["start"].replace(day=1) <= m_dt.replace(day=1) <= c["end"].replace(day=1):
+                            cur_dues = base_dues * (1 - c["discount"] / 100.0)
+                            break
+                except: pass
+                dues_list.append(cur_dues)
+                
+            st.session_state.calc_df["Base Dues"] = dues_list
             
         st.markdown("#### 📝 Input Payments (Editable)")
         st.info("Edit the **Payment Received** column below to simulate different scenarios. The Ledger will dynamically recalculate below.")
@@ -2194,6 +2548,14 @@ elif app_mode == "⚙️ Settings":
             new_penalty_apr = st.number_input("Late Payment Annual Interest Rate (%)", min_value=0.0, value=float(current_settings.get("penalty_apr", 18.0)), step=1.0, help="Annual Percentage Rate. Will divide by 12 for monthly calculation.")
 
         st.markdown("---")
+        st.markdown("#### 🎁 Advance Payment Concessions")
+        ccol1, ccol2 = st.columns(2)
+        with ccol1:
+            new_conc_6 = st.number_input("6 Months Advance Discount (%)", min_value=0.0, max_value=100.0, value=float(current_settings.get("concession_6_months", 5.0)), step=1.0)
+        with ccol2:
+            new_conc_12 = st.number_input("12 Months Advance Discount (%)", min_value=0.0, max_value=100.0, value=float(current_settings.get("concession_12_months", 10.0)), step=1.0)
+
+        st.markdown("---")
         st.markdown("#### 📧 Email Receipt Settings (Brevo SMTP)")
         st.caption("Sign up free at [brevo.com](https://www.brevo.com) → SMTP & API → Copy SMTP Key")
         ecol1, ecol2 = st.columns(2)
@@ -2210,6 +2572,8 @@ elif app_mode == "⚙️ Settings":
                 "tenant_maintenance": new_tenant_maint,
                 "penalty_apr": new_penalty_apr,
                 "grace_period_day": new_grace,
+                "concession_6_months": new_conc_6,
+                "concession_12_months": new_conc_12,
                 "gmail_sender_email": new_sender_email,
                 "brevo_login": new_brevo_login,
                 "brevo_smtp_key": new_brevo_key,
@@ -2583,6 +2947,82 @@ elif app_mode == "👥 User Management":
 
 
 # --- Change Password Menu (For all users) ---
+elif app_mode == "📊 Report":
+    st.title("📊 Financial Reports")
+    st.markdown('<p class="info-text">Generate comprehensive financial summaries and defaulter lists below.</p>', unsafe_allow_html=True)
+
+    report_type = st.radio("Select Report Type", ["Defaulter List"], horizontal=True)
+
+    if report_type == "Defaulter List":
+        st.markdown("### 📋 Defaulter List")
+        col1, col2 = st.columns(2)
+        with col1:
+            as_of_date = st.date_input("Calculation As of Date", value=pd.Timestamp.now())
+        with col2:
+            threshold = st.number_input("Amount Threshold (₹)", min_value=0, value=1000, step=1000, help="Only show flats with total obligation above this amount.")
+
+        if st.button("🚀 Generate Report", type="primary"):
+            try:
+                engine = get_engine()
+                # 1. Fetch all flats
+                df_flats = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
+                flat_list = sorted(df_flats['Flat No'].dropna().unique().tolist())
+
+                report_data = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for i, flat in enumerate(flat_list):
+                    status_text.text(f"Processing {flat}... ({i+1}/{len(flat_list)})")
+                    progress_bar.progress((i + 1) / len(flat_list))
+                    
+                    ledger = calculate_flat_ledger(flat, as_of_date=as_of_date, engine=engine)
+                    
+                    if ledger['total_obligation'] >= threshold:
+                        report_data.append({
+                            "Flat No": flat,
+                            "Owner Name": ledger['owner_name'],
+                            "Total Principal Paid": ledger['total_principle_paid'],
+                            "Total Penalty Paid": ledger['total_penalty_paid'],
+                            "Principal Due": ledger['closing_principal'],
+                            "Accumulated Penalty": ledger['accumulated_penalty'],
+                            "Total Obligation": ledger['total_obligation']
+                        })
+
+                progress_bar.empty()
+                status_text.empty()
+
+                if not report_data:
+                    st.info("No defaulters found based on your filters.")
+                else:
+                    df_report = pd.DataFrame(report_data)
+                    st.success(f"Found {len(df_report)} defaulters.")
+                    
+                    # Formatting for display
+                    df_disp = df_report.copy()
+                    for col in ["Total Principal Paid", "Total Penalty Paid", "Principal Due", "Accumulated Penalty", "Total Obligation"]:
+                        df_disp[col] = df_disp[col].apply(lambda x: f"₹{x:,.2f}")
+
+                    st.dataframe(df_disp, use_container_width=True, hide_index=True)
+
+                    # Export to Excel
+                    def to_excel(df):
+                        import io
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Defaulter Report')
+                        return output.getvalue()
+
+                    st.download_button(
+                        label="📥 Download Defaulter Report as Excel",
+                        data=to_excel(df_report),
+                        file_name=f"Defaulter_Report_{as_of_date.strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+            except Exception as e:
+                st.error(f"Error generating report: {e}")
+
 elif app_mode == "🔑 Change Password":
     st.title("🔑 Change Your Password")
     st.markdown('<p class="info-text">Update your login password to keep your account secure.</p>', unsafe_allow_html=True)
