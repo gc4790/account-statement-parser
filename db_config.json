@@ -1,8 +1,0 @@
-{
-    "host": "gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
-    "port": "4000",
-    "user": "2XvmS8H4LoPtvAk.root",
-    "password": "Q2XIwHOKPMCJUFTX",
-    "database": "society_plus",
-    "use_ssl": true
-}

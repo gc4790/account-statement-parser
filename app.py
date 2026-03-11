@@ -458,7 +458,7 @@ elif app_mode == "🏢 Flat Management":
         pass
     selected_flat = st.selectbox("🏠 Select Flat", ["-- Select Flat --"] + _flat_list_shared, key="shared_flat_selector")
 
-    tab_search, tab_upload, tab_calc = st.tabs(["🔍 Search Flat Details", "📥 Bulk Upload Tenant/Owner DB", "🧮 Maintenance Calculator"])
+    tab_search, tab_owner_hist, tab_tenant_hist, tab_calc = st.tabs(["🔍 Search Flat Details", "📜 Owner History", "👥 Tenant History", "🧮 Maintenance Calculator"])
 
 
     with tab_search:
@@ -892,7 +892,7 @@ if app_mode == "🔍 Transaction Search":
     else:
         st.info("💡 Make a selection in the Accounts Statement Records table above to view the preview and submit payments for approval.")
 
-    if st.session_state.role == "admin":
+    if st.session_state.role in ["admin", "manager"]:
         st.markdown("---")
         with st.expander("➕ Add Payment to Flat Ledger", expanded=False):
             st.markdown("Found a missing transaction? Manually add it to a Flat's ledger here.")
@@ -1074,10 +1074,10 @@ elif app_mode == "📤 Bulk Upload":
 
     with tab_residents:
         st.markdown("### 🏠 Tenant & Owner Database")
-        if st.session_state.role == "admin":
+        if st.session_state.role in ["admin", "manager"]:
             flat_file = st.file_uploader("📥 Bulk Upload Resident Details (.xls / .xlsx)", type=["xls", "xlsx"], key="bulk_flat_upload")
         else:
-            st.info("🔒 Only Admins can upload Tenant data.")
+            st.info("🔒 Only Admins or Managers can upload Tenant data.")
             flat_file = None
 
         try:
@@ -1100,8 +1100,8 @@ elif app_mode == "📤 Bulk Upload":
             else:
                 df_flat = df_flat_db
 
-            edited_df = st.data_editor(df_flat, num_rows="dynamic" if st.session_state.role=="admin" else "fixed", use_container_width=True, hide_index=True)
-            if st.session_state.role == "admin" and st.button("💾 Save Resident DB", type="primary"):
+            edited_df = st.data_editor(df_flat, num_rows="dynamic" if st.session_state.role in ["admin", "manager"] else "fixed", use_container_width=True, hide_index=True)
+            if st.session_state.role in ["admin", "manager"] and st.button("💾 Save Resident DB", type="primary"):
                 edited_df.to_sql("flat_details", con=engine, if_exists="replace", index=False)
                 st.success("✅ Database updated!")
         except Exception as e:
@@ -1110,7 +1110,117 @@ elif app_mode == "📤 Bulk Upload":
 # --- Flat Management Menu ---
 elif app_mode == "🏢 Flat Management":
     st.markdown("---")
-    # Content remains, but the tab_upload logic is removed below as it's been centralized
+    with tab_owner_hist:
+        st.markdown(f"### 📜 Owner History for {selected_flat}")
+        if selected_flat != "-- Select Flat --":
+            try:
+                engine = get_engine()
+                # Ensure table exists
+                with engine.connect() as conn:
+                    conn.execute(sqlalchemy.text("""
+                        CREATE TABLE IF NOT EXISTS owner_history (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            flat_no VARCHAR(50),
+                            owner_name VARCHAR(255),
+                            contact VARCHAR(50),
+                            from_date VARCHAR(20),
+                            to_date VARCHAR(20)
+                        )
+                    """))
+                    conn.commit()
+                
+                # Fetch data
+                df_owner = pd.read_sql(f"SELECT owner_name, contact, from_date, to_date FROM owner_history WHERE flat_no = '{selected_flat}'", con=engine)
+                
+                edited_owner = st.data_editor(
+                    df_owner, 
+                    num_rows="dynamic", 
+                    use_container_width=True, 
+                    hide_index=True, 
+                    key=f"owner_hist_ed_{selected_flat}",
+                    column_config={
+                        "owner_name": st.column_config.TextColumn("Owner Name", required=True),
+                        "contact": st.column_config.TextColumn("Contact"),
+                        "from_date": st.column_config.TextColumn("From Date (e.g. 2023-04)"),
+                        "to_date": st.column_config.TextColumn("To Date (e.g. 2024-03)")
+                    }
+                )
+                
+                if st.button("💾 Save Owner History", key="btn_save_owner_hist"):
+                    with engine.begin() as conn:
+                        conn.execute(sqlalchemy.text("DELETE FROM owner_history WHERE flat_no = :f"), {"f": selected_flat})
+                        for _, row in edited_owner.iterrows():
+                            if str(row.get("owner_name", "")).strip():
+                                conn.execute(sqlalchemy.text("""
+                                    INSERT INTO owner_history (flat_no, owner_name, contact, from_date, to_date)
+                                    VALUES (:f, :n, :c, :fd, :td)
+                                """), {
+                                    "f": selected_flat,
+                                    "n": row.get("owner_name"),
+                                    "c": row.get("contact"),
+                                    "fd": row.get("from_date"),
+                                    "td": row.get("to_date")
+                                })
+                    st.success("✅ Owner history updated!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    with tab_tenant_hist:
+        st.markdown(f"### 👥 Tenant History for {selected_flat}")
+        if selected_flat != "-- Select Flat --":
+            try:
+                engine = get_engine()
+                # Ensure table exists
+                with engine.connect() as conn:
+                    conn.execute(sqlalchemy.text("""
+                        CREATE TABLE IF NOT EXISTS tenant_history (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            flat_no VARCHAR(50),
+                            tenant_name VARCHAR(255),
+                            contact VARCHAR(50),
+                            from_date VARCHAR(20),
+                            to_date VARCHAR(20)
+                        )
+                    """))
+                    conn.commit()
+                
+                # Fetch data
+                df_tenant = pd.read_sql(f"SELECT tenant_name, contact, from_date, to_date FROM tenant_history WHERE flat_no = '{selected_flat}'", con=engine)
+                
+                edited_tenant = st.data_editor(
+                    df_tenant, 
+                    num_rows="dynamic", 
+                    use_container_width=True, 
+                    hide_index=True, 
+                    key=f"tenant_hist_ed_{selected_flat}",
+                    column_config={
+                        "tenant_name": st.column_config.TextColumn("Tenant Name", required=True),
+                        "contact": st.column_config.TextColumn("Contact"),
+                        "from_date": st.column_config.TextColumn("From Date"),
+                        "to_date": st.column_config.TextColumn("To Date")
+                    }
+                )
+                
+                if st.button("💾 Save Tenant History", key="btn_save_tenant_hist"):
+                    with engine.begin() as conn:
+                        conn.execute(sqlalchemy.text("DELETE FROM tenant_history WHERE flat_no = :f"), {"f": selected_flat})
+                        for _, row in edited_tenant.iterrows():
+                            if str(row.get("tenant_name", "")).strip():
+                                conn.execute(sqlalchemy.text("""
+                                    INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date)
+                                    VALUES (:f, :n, :c, :fd, :td)
+                                """), {
+                                    "f": selected_flat,
+                                    "n": row.get("tenant_name"),
+                                    "c": row.get("contact"),
+                                    "fd": row.get("from_date"),
+                                    "td": row.get("to_date")
+                                })
+                    st.success("✅ Tenant history updated!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
 
     with tab_calc:
         st.markdown("### 🧮 Maintenance Ledger & Penalty Calculator")
@@ -1446,8 +1556,16 @@ elif app_mode == "🏢 Flat Management":
 
             # Rule 1 & Rule 3: Penalty if principal payment not received / underpaid
             if principal_after_payment > 0 and month_dt is not None and month_dt >= PENALTY_START:
-                # Calculate penalty based on the unadjusted principal owed (simple interest)
-                penalty_applied = principal_after_payment * monthly_interest_rate
+                # Delay Penalty: Only apply current month's penalty if today is past the grace day
+                _today = pd.Timestamp.now()
+                is_current_month = (month_dt.year == _today.year and month_dt.month == _today.month)
+                
+                if is_current_month and _today.day < grace_day:
+                    penalty_applied = 0.0
+                else:
+                    # Calculate penalty based on the unadjusted principal owed (simple interest)
+                    penalty_applied = principal_after_payment * monthly_interest_rate
+                
                 # Simple Interest: Add to accumulated penalty, NOT to principal
                 accumulated_penalty += penalty_applied
                 closing_principal = principal_after_payment
@@ -1559,7 +1677,7 @@ elif app_mode == "🏢 Flat Management":
 
         # --- Send Payment Receipt Email ---
         st.markdown("---")
-        if st.session_state.role == "admin":
+        if st.session_state.role in ["admin", "manager"]:
             if st.button("📧 Send Payment Receipt to Flat Owner", type="primary", use_container_width=True):
                 _sett = load_settings()
                 _brevo_login = _sett.get("brevo_login", "").strip()
