@@ -9,6 +9,80 @@ from sqlalchemy import text as _text
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(BASE_DIR, "society_settings.json")
 
+# --- Page Config & Styling ---
+st.set_page_config(
+    page_title="Account Statement Parser",
+    page_icon="🧾",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# Premium Custom CSS
+st.markdown("""
+<style>
+    /* Main background */
+    .stApp {
+        background-color: #0e1117;
+    }
+    
+    /* Header styling */
+    h1 {
+        color: #fca311;
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        text-shadow: 0px 4px 10px rgba(0,0,0,0.5);
+    }
+    
+    /* Input box styling */
+    .stTextInput > div > div > input {
+        border-radius: 10px;
+        border: 2px solid #3a3f58;
+        background-color: #1a1e2b;
+        color: #ffffff;
+        padding: 10px 15px;
+        font-size: 16px;
+        transition: all 0.3s ease;
+    }
+    .stTextInput > div > div > input:focus {
+        border-color: #fca311;
+        box-shadow: 0 0 10px rgba(252, 163, 17, 0.4);
+    }
+    
+    /* Premium Dataframe / Table container */
+    [data-testid="stDataFrame"] {
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        border: 1px solid rgba(255,255,255,0.05);
+    }
+    
+    /* Info text styling */
+    .info-text {
+        font-size: 1.1rem;
+        color: #a0aec0;
+        margin-bottom: 20px;
+    }
+    
+    /* Glassmorphism metric cards */
+    [data-testid="stMetric"] {
+        background: rgba(26, 30, 43, 0.6);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-radius: 15px;
+        padding: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s;
+    }
+    [data-testid="stMetric"]:hover {
+        transform: translateY(-5px);
+    }
+    [data-testid="stMetricValue"] {
+        color: #00f0ff;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 def load_settings():
     default_settings = {
         "base_maintenance": 2500.0,
@@ -73,9 +147,21 @@ def get_engine():
     # 2. Local Fallback (For Local Development)
     _c = load_db_config()
     _url = f"mysql+pymysql://{_c['user']}:{_c['password']}@{_c['host']}:{_c['port']}/{_c['database']}"
-    if _c.get("use_ssl", False):
-        return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
-    return sqlalchemy.create_engine(_url)
+    
+    try:
+        if _c.get("use_ssl", False):
+            engine = sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
+        else:
+            engine = sqlalchemy.create_engine(_url)
+        # Test connection quickly immediately
+        with engine.connect() as conn:
+            pass
+        return engine
+    except Exception as e:
+        # Show exactly what URL we tried (masking password)
+        safe_url = _url.replace(_c['password'], "*****")
+        st.error(f"Failed configuring engine with {safe_url}")
+        raise e
 
 def calculate_flat_ledger(flat_no, as_of_date=None, engine=None):
     """
@@ -333,81 +419,6 @@ def _show_payment_breakdown(month_label, txns):
     )
 
 
-# --- Page Config & Styling ---
-st.set_page_config(
-    page_title="Account Statement Parser",
-    page_icon="🧾",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-# Premium Custom CSS
-st.markdown("""
-<style>
-    /* Main background */
-    .stApp {
-        background-color: #0e1117;
-    }
-    
-    /* Header styling */
-    h1 {
-        color: #fca311;
-        font-family: 'Inter', sans-serif;
-        font-weight: 700;
-        text-shadow: 0px 4px 10px rgba(0,0,0,0.5);
-    }
-    
-    /* Input box styling */
-    .stTextInput > div > div > input {
-        border-radius: 10px;
-        border: 2px solid #3a3f58;
-        background-color: #1a1e2b;
-        color: #ffffff;
-        padding: 10px 15px;
-        font-size: 16px;
-        transition: all 0.3s ease;
-    }
-    .stTextInput > div > div > input:focus {
-        border-color: #fca311;
-        box-shadow: 0 0 10px rgba(252, 163, 17, 0.4);
-    }
-    
-    /* Premium Dataframe / Table container */
-    [data-testid="stDataFrame"] {
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-        border: 1px solid rgba(255,255,255,0.05);
-    }
-    
-    /* Info text styling */
-    .info-text {
-        font-size: 1.1rem;
-        color: #a0aec0;
-        margin-bottom: 20px;
-    }
-    
-    /* Glassmorphism metric cards */
-    [data-testid="stMetric"] {
-        background: rgba(26, 30, 43, 0.6);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        border-radius: 15px;
-        padding: 20px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        transition: transform 0.2s;
-    }
-    [data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-    }
-    [data-testid="stMetricValue"] {
-        color: #00f0ff;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
 # Main title logic moved into dedicated view blocks below
 
 
@@ -463,6 +474,17 @@ def init_auth_db():
                     username VARCHAR(50) PRIMARY KEY,
                     password_hash VARCHAR(255) NOT NULL,
                     role VARCHAR(20) NOT NULL
+                )
+            """))
+            conn.execute(sqlalchemy.text("""
+                CREATE TABLE IF NOT EXISTS society_expenses (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    `Date` VARCHAR(20),
+                    `Category` VARCHAR(50),
+                    `Description` TEXT,
+                    `Amount` DECIMAL(12,2),
+                    `Narration` TEXT,
+                    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
             res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM app_users")).scalar()
@@ -531,8 +553,9 @@ st.sidebar.divider()
 st.sidebar.markdown("## 🧭 Navigation")
 
 # Hide Settings from Viewer role
-nav_options = ["🔍 Transaction Search", "🏢 Flat Management"]
+nav_options = ["📊 Dashboard", "🔍 Transaction Search", "🏢 Flat Management"]
 if st.session_state.role in ["admin", "manager"]:
+    nav_options.append("💸 Expense Tracker")
     nav_options.append("📤 Bulk Upload")
     nav_options.append("📊 Report")
 if st.session_state.role == "admin":
@@ -542,7 +565,18 @@ if st.session_state.role == "admin":
 
 nav_options.append("🔑 Change Password")
 
-app_mode = st.sidebar.radio("Select View:", nav_options)
+# Handle navigation via session state to allow redirects
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "📊 Dashboard"
+
+# Find index of current mode in options
+try:
+    radio_index = nav_options.index(st.session_state.app_mode)
+except ValueError:
+    radio_index = 0
+
+app_mode = st.sidebar.radio("Select View:", nav_options, index=radio_index)
+st.session_state.app_mode = app_mode
 
 # --- Load DB config globally (used across all pages) ---
 _cfg = load_db_config()
@@ -560,6 +594,82 @@ if "df_rec" not in st.session_state:
     st.session_state.df_rec = None
 if "calc_key" not in st.session_state:
     st.session_state.calc_key = 0
+
+if app_mode == "📊 Dashboard":
+    st.title("📊 Society Dashboard")
+    st.markdown('<p class="info-text">High-level overview of society health and financials.</p>', unsafe_allow_html=True)
+    
+    # Initialize metrics
+    total_res = 0
+    total_owners = 0
+    total_tenants = 0
+    total_defaulters = 0
+    avg_monthly_expense = 0.0
+    avg_monthly_income = 0.0
+    
+    try:
+        engine = get_engine()
+        
+        # 1. Total Residents & Owner/Tenant Split
+        df_flats = pd.read_sql("SELECT `Rented Status` FROM flat_details", engine)
+        if not df_flats.empty:
+            total_res = len(df_flats)
+            # Count tenants (Y or Yes)
+            is_tenant = df_flats['Rented Status'].astype(str).str.upper().str.startswith('Y')
+            total_tenants = is_tenant.sum()
+            total_owners = total_res - total_tenants
+            
+        # 2. Total Defaulters
+        # Flat carry forward tracks the live outstanding balances
+        df_fcf = pd.read_sql("SELECT `Outstanding` FROM flat_carry_forward", engine)
+        if not df_fcf.empty:
+            df_fcf['Outstanding'] = pd.to_numeric(df_fcf['Outstanding'], errors='coerce').fillna(0)
+            total_defaulters = (df_fcf['Outstanding'] > 0).sum()
+            
+        # 3. Average Monthly Expense (from society_expenses)
+        df_exp = pd.read_sql("SELECT `Date`, `Amount` FROM society_expenses", engine)
+        if not df_exp.empty:
+            df_exp['Date'] = pd.to_datetime(df_exp['Date'], errors='coerce')
+            df_exp['Amount'] = pd.to_numeric(df_exp['Amount'], errors='coerce').fillna(0)
+            df_exp = df_exp.dropna(subset=['Date'])
+            if not df_exp.empty:
+                # Group by Year-Month
+                df_exp['Month_Yr'] = df_exp['Date'].dt.to_period('M')
+                monthly_totals = df_exp.groupby('Month_Yr')['Amount'].sum()
+                if not monthly_totals.empty:
+                    avg_monthly_expense = monthly_totals.mean()
+                    
+        # 4. Average Monthly Maintenance Received (from payment_history)
+        df_inc = pd.read_sql("SELECT `Date`, `Amount` FROM payment_history", engine)
+        if not df_inc.empty:
+            df_inc['Date'] = pd.to_datetime(df_inc['Date'], errors='coerce')
+            df_inc['Amount'] = pd.to_numeric(df_inc['Amount'], errors='coerce').fillna(0)
+            df_inc = df_inc.dropna(subset=['Date'])
+            if not df_inc.empty:
+                df_inc['Month_Yr'] = df_inc['Date'].dt.to_period('M')
+                monthly_totals_inc = df_inc.groupby('Month_Yr')['Amount'].sum()
+                if not monthly_totals_inc.empty:
+                    avg_monthly_income = monthly_totals_inc.mean()
+                    
+    except Exception as e:
+        st.warning(f"Dashboard metrics could not be fully loaded. Database might be initializing. Details: {e}")
+
+    # Layout Metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Residents", f"{total_res}", delta=f"{total_owners} Owners / {total_tenants} Tenants", delta_color="off")
+    with col2:
+        st.metric("Defaulters (Outstanding > 0)", f"{total_defaulters}")
+    with col3:
+        pass # Spacer
+        
+    st.markdown("---")
+    st.markdown("### 💰 Financials (Monthly Averages)")
+    col4, col5 = st.columns(2)
+    with col4:
+        st.metric("Avg Monthly Maintenance Received", f"₹ {avg_monthly_income:,.2f}")
+    with col5:
+        st.metric("Avg Monthly Expense", f"₹ {avg_monthly_expense:,.2f}", delta="- Outflow", delta_color="inverse")
 
 # Show file uploader only in Transaction Search mode
 if app_mode == "🔍 Transaction Search":
@@ -805,7 +915,7 @@ if app_mode == "🔍 Transaction Search":
     with tab_credit:
         # Filter for rows where Deposit column has a value > 0
         df_credit = pd.DataFrame()
-        if len(filtered_df_stmt) > 0 and 'Deposit' in filtered_df_stmt.columns:
+        if filtered_df_stmt is not None and len(filtered_df_stmt) > 0 and 'Deposit' in filtered_df_stmt.columns:
             # Convert Deposit to float to filter safely
             deposit_vals = pd.to_numeric(filtered_df_stmt['Deposit'], errors='coerce').fillna(0)
             df_credit = filtered_df_stmt[deposit_vals > 0]
@@ -836,7 +946,7 @@ if app_mode == "🔍 Transaction Search":
     with tab_debit:
         # Filter for rows where Withdrawal column has a value > 0
         df_debit = pd.DataFrame()
-        if len(filtered_df_stmt) > 0 and 'Withdrawal' in filtered_df_stmt.columns:
+        if filtered_df_stmt is not None and len(filtered_df_stmt) > 0 and 'Withdrawal' in filtered_df_stmt.columns:
             # Convert Withdrawal to float to filter safely
             withdrawal_vals = pd.to_numeric(filtered_df_stmt['Withdrawal'], errors='coerce').fillna(0)
             df_debit = filtered_df_stmt[withdrawal_vals > 0]
@@ -865,7 +975,7 @@ if app_mode == "🔍 Transaction Search":
             st.warning("No Debit (Withdrawal) records found matching your query.")
     
     with tab_rec:
-        if len(filtered_df_rec) > 0:
+        if filtered_df_rec is not None and len(filtered_df_rec) > 0:
             st.dataframe(
                 filtered_df_rec,
                 use_container_width=True,
@@ -878,8 +988,18 @@ if app_mode == "🔍 Transaction Search":
     st.markdown("---")
     
     if selected_tx_df is not None and not selected_tx_df.empty:
-        st.markdown("### 📥 Preview & Submit Selected Payments")
-        st.success(f"✅ Picked {len(selected_tx_df)} transaction(s) for submission. Please assign a Flat Number and Ledger details for each.")
+        is_withdrawal_batch = False
+        if 'Withdrawal' in selected_tx_df.columns:
+            # Check if any row has a withdrawal > 0
+            w_vals = pd.to_numeric(selected_tx_df['Withdrawal'], errors='coerce').fillna(0)
+            if (w_vals > 0).any():
+                is_withdrawal_batch = True
+                
+        st.markdown("### 📥 Preview & Submit Selected Records")
+        if is_withdrawal_batch:
+            st.success(f"✅ Picked {len(selected_tx_df)} withdrawal(s). Please classify these Society Expenses.")
+        else:
+            st.success(f"✅ Picked {len(selected_tx_df)} deposit(s) for submission. Please assign a Flat Number and Ledger details for each.")
         
         # 1. Prepare dynamic flat list for dropdown validation
         _flat_list = []
@@ -890,17 +1010,23 @@ if app_mode == "🔍 Transaction Search":
         except Exception:
             pass
             
-        # UI for Manual Multi-Flat Override
-        st.markdown("#### 🛠️ Manual Split Settings")
-        col_m1, col_m2 = st.columns([1, 2])
-        with col_m1:
-            enable_manual_split = st.checkbox("Apply Multi-Flat Split (Manual)", key="manual_split_check")
-        with col_m2:
+        # UI for Manual Multi-Flat Override (Only for Deposits)
+        if not is_withdrawal_batch:
+            st.markdown("#### 🛠️ Manual Split Settings")
+            col_m1, col_m2 = st.columns([1, 2])
+            with col_m1:
+                enable_manual_split = st.checkbox("Apply Multi-Flat Split (Manual)", key="manual_split_check")
+            with col_m2:
+                override_flats = []
+                if enable_manual_split:
+                    override_flats = st.multiselect("Select Flats for Split", options=_flat_list, key="manual_split_flats")
+                    if override_flats:
+                        st.caption(f"💡 All selected transactions will be split {len(override_flats)}-way.")
+        else:
+            enable_manual_split = False
             override_flats = []
-            if enable_manual_split:
-                override_flats = st.multiselect("Select Flats for Split", options=_flat_list, key="manual_split_flats")
-                if override_flats:
-                    st.caption(f"💡 All selected transactions will be split {len(override_flats)}-way.")
+            
+        expense_categories = ["Security", "Electricity & Water", "Housekeeping", "Repairs & Maintenance", "Admin & Legal", "Event", "Salary", "Other"]
 
         # 2. Re-format the selected dataset into a cleanly structured Pending schema
         preview_data = []
@@ -974,126 +1100,183 @@ if app_mode == "🔍 Transaction Search":
                             break
             
             # --- Build Preview Data (Handle Split Payments) ---
-            final_detected_flats = []
-            if enable_manual_split and override_flats:
-                final_detected_flats = override_flats
-            else:
-                final_detected_flats = detected_flats
-
-            if len(final_detected_flats) > 1:
-                # N-way Split between detected/manual flats
-                split_amount = p_amount / len(final_detected_flats)
-                for f_no in final_detected_flats:
-                    preview_data.append({
-                        "Assign Flat No": f_no, 
-                        "Ledger Month": p_month, 
-                        "Ledger Year": p_year,
-                        "Amount (₹)": split_amount,
-                        "Date": p_date,
-                        "Narration Ref": p_narration
-                    })
-            else:
-                # Single flat or no flat detected
-                final_flat = final_detected_flats[0] if final_detected_flats else ""
+            if is_withdrawal_batch:
                 preview_data.append({
-                    "Assign Flat No": final_flat, 
-                    "Ledger Month": p_month, 
-                    "Ledger Year": p_year,
+                    "Expense Category": "Other", 
+                    "Description": p_narration[:200], # Default description to narration
                     "Amount (₹)": p_amount,
                     "Date": p_date,
                     "Narration Ref": p_narration
                 })
+            else:
+                final_detected_flats = []
+                if enable_manual_split and override_flats:
+                    final_detected_flats = override_flats
+                else:
+                    final_detected_flats = detected_flats
+    
+                if len(final_detected_flats) > 1:
+                    # N-way Split between detected/manual flats
+                    split_amount = p_amount / len(final_detected_flats)
+                    for f_no in final_detected_flats:
+                        preview_data.append({
+                            "Assign Flat No": f_no, 
+                            "Ledger Month": p_month, 
+                            "Ledger Year": p_year,
+                            "Amount (₹)": split_amount,
+                            "Date": p_date,
+                            "Narration Ref": p_narration
+                        })
+                else:
+                    # Single flat or no flat detected
+                    final_flat = final_detected_flats[0] if final_detected_flats else ""
+                    preview_data.append({
+                        "Assign Flat No": final_flat, 
+                        "Ledger Month": p_month, 
+                        "Ledger Year": p_year,
+                        "Amount (₹)": p_amount,
+                        "Date": p_date,
+                        "Narration Ref": p_narration
+                    })
             
         preview_df = pd.DataFrame(preview_data)
         
         # 3. Create the Editable Dataframe
-        edited_preview = st.data_editor(
-            preview_df,
-            column_config={
-                "Assign Flat No": st.column_config.SelectboxColumn(
-                    "Flat Number",
-                    help="Assign the flat. Auto-detected from narration if available.",
-                    width="medium",
-                    options=_dropdown_list,
-                    required=True
-                ),
-                "Ledger Month": st.column_config.SelectboxColumn(
-                    "Month",
-                    options=months,
-                    required=True
-                ),
-                "Ledger Year": st.column_config.NumberColumn(
-                    "Year",
-                    min_value=2020,
-                    max_value=2030,
-                    step=1,
-                    required=True
-                ),
-                "Amount (₹)": st.column_config.NumberColumn(disabled=True),
-                "Date": st.column_config.TextColumn(disabled=True),
-                "Narration Ref": st.column_config.TextColumn(disabled=True, width="large"),
-            },
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed"
-        )
+        if is_withdrawal_batch:
+            edited_preview = st.data_editor(
+                preview_df,
+                column_config={
+                    "Expense Category": st.column_config.SelectboxColumn(
+                        "Spend Type",
+                        help="Categorize this expense",
+                        width="medium",
+                        options=expense_categories,
+                        required=True
+                    ),
+                    "Description": st.column_config.TextColumn(
+                        "Description / Remarks",
+                        help="Add notes about this expense",
+                        required=True
+                    ),
+                    "Amount (₹)": st.column_config.NumberColumn(disabled=True),
+                    "Date": st.column_config.TextColumn(disabled=True),
+                    "Narration Ref": st.column_config.TextColumn(disabled=True, width="large"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed"
+            )
+        else:
+            edited_preview = st.data_editor(
+                preview_df,
+                column_config={
+                    "Assign Flat No": st.column_config.SelectboxColumn(
+                        "Flat Number",
+                        help="Assign the flat. Auto-detected from narration if available.",
+                        width="medium",
+                        options=_dropdown_list,
+                        required=True
+                    ),
+                    "Ledger Month": st.column_config.SelectboxColumn(
+                        "Month",
+                        options=months,
+                        required=True
+                    ),
+                    "Ledger Year": st.column_config.NumberColumn(
+                        "Year",
+                        min_value=2020,
+                        max_value=2030,
+                        step=1,
+                        required=True
+                    ),
+                    "Amount (₹)": st.column_config.NumberColumn(disabled=True),
+                    "Date": st.column_config.TextColumn(disabled=True),
+                    "Narration Ref": st.column_config.TextColumn(disabled=True, width="large"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed"
+            )
         
-        if st.button("📤 Bulk Submit to Pending Approvals", type="primary"):
+        submit_btn_label = "📤 Save Direct Expenses" if is_withdrawal_batch else "📤 Bulk Submit to Pending Approvals"
+        if st.button(submit_btn_label, type="primary"):
             errors = []
             success_count = 0
             
             engine = get_engine()
             
             with engine.begin() as _conn: # Using explicit transaction
-                # Ensure table exists
-                _conn.execute(sqlalchemy.text("""
-                    CREATE TABLE IF NOT EXISTS pending_payments (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        `Flat Number` VARCHAR(50),
-                        `Month` VARCHAR(20),
-                        `Date` VARCHAR(20),
-                        `Narration` TEXT,
-                        `Amount` DECIMAL(12,2),
-                        `narration_ref` VARCHAR(100),
-                        `submitted_by` VARCHAR(50),
-                        `submitted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """))
-                
-                # Insert each edited row
-                for idx, row in edited_preview.iterrows():
-                    m_flat = str(row["Assign Flat No"]).strip()
-                    if not m_flat:
-                        errors.append(f"Row {idx+1}: Missing Flat Number.")
-                        continue
-                        
-                    m_month_label = f"{row['Ledger Month']} {row['Ledger Year']}"
+                if is_withdrawal_batch:
+                    # Withdrawals save directly to expenses
+                    for idx, row in edited_preview.iterrows():
+                        try:
+                            _conn.execute(sqlalchemy.text("""
+                                INSERT INTO society_expenses 
+                                (`Date`, `Category`, `Description`, `Amount`, `Narration`)
+                                VALUES (:date, :cat, :desc, :amount, :narr)
+                            """), {
+                                "date": row["Date"],
+                                "cat": row["Expense Category"],
+                                "desc": row["Description"],
+                                "amount": float(row["Amount (₹)"]),
+                                "narr": row["Narration Ref"]
+                            })
+                            success_count += 1
+                        except Exception as e:
+                            errors.append(f"Row {idx+1}: DB error - {e}")
+                else:
+                    # Deposits go to permissions queue
+                    _conn.execute(sqlalchemy.text("""
+                        CREATE TABLE IF NOT EXISTS pending_payments (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            `Flat Number` VARCHAR(50),
+                            `Month` VARCHAR(20),
+                            `Date` VARCHAR(20),
+                            `Narration` TEXT,
+                            `Amount` DECIMAL(12,2),
+                            `narration_ref` VARCHAR(100),
+                            `submitted_by` VARCHAR(50),
+                            `submitted_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
                     
-                    try:
-                        _conn.execute(sqlalchemy.text("""
-                            INSERT INTO pending_payments 
-                            (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
-                            VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
-                        """), {
-                            "flat": m_flat,
-                            "month": m_month_label,
-                            "date": row["Date"],
-                            "narration": row["Narration Ref"],
-                            "amount": float(row["Amount (₹)"]),
-                            "ref": str(row["Narration Ref"])[:100] if row["Narration Ref"] else None,
-                            "by": st.session_state.username
-                        })
-                        success_count += 1
-                    except Exception as e:
-                        errors.append(f"Row {idx+1}: DB error - {e}")
+                    # Insert each edited row
+                    for idx, row in edited_preview.iterrows():
+                        m_flat = str(row["Assign Flat No"]).strip()
+                        if not m_flat:
+                            errors.append(f"Row {idx+1}: Missing Flat Number.")
+                            continue
+                            
+                        m_month_label = f"{row['Ledger Month']} {row['Ledger Year']}"
+                        
+                        try:
+                            _conn.execute(sqlalchemy.text("""
+                                INSERT INTO pending_payments 
+                                (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `narration_ref`, `submitted_by`)
+                                VALUES (:flat, :month, :date, :narration, :amount, :ref, :by)
+                            """), {
+                                "flat": m_flat,
+                                "month": m_month_label,
+                                "date": row["Date"],
+                                "narration": row["Narration Ref"],
+                                "amount": float(row["Amount (₹)"]),
+                                "ref": str(row["Narration Ref"])[:100] if row["Narration Ref"] else None,
+                                "by": st.session_state.username
+                            })
+                            success_count += 1
+                        except Exception as e:
+                            errors.append(f"Row {idx+1}: DB error - {e}")
                         
             if success_count > 0:
-                st.success(f"🎉 Successfully submitted {success_count} payment(s) to the Admin Pending Approvals queue!")
+                if is_withdrawal_batch:
+                    st.success(f"🎉 Successfully saved {success_count} society expense(s)!")
+                else:
+                    st.success(f"🎉 Successfully submitted {success_count} payment(s) to the Admin Pending Approvals queue!")
             if errors:
                 for err in errors:
                     st.error(err)
     else:
-        st.info("💡 Make a selection in the Accounts Statement Records table above to view the preview and submit payments for approval.")
+        st.info("💡 Make a selection in the Accounts Statement Records table above to view the preview and submit records.")
 
     if st.session_state.role in ["admin", "manager"]:
         st.markdown("---")
@@ -1284,33 +1467,231 @@ elif app_mode == "📤 Bulk Upload":
             flat_file = None
 
         try:
-            df_flat_db = pd.read_sql("SELECT * FROM flat_details", con=engine)
+            # Define the expected schema explicitly as a fallback
+            FLAT_DB_COLUMNS = ['Flat No', 'Owner Name', 'Rented Status', 'Tenant Name', 'Flat Type', 'Area (sq ft)', 'Contact Number']
+            
+            # State for holding parsed tenant data so it isn't lost on rerun
+            if "tenant_upload_df" not in st.session_state:
+                st.session_state.tenant_upload_df = None
+            
+            try:
+                df_flat_db = pd.read_sql("SELECT * FROM flat_details LIMIT 0", con=engine)
+                db_cols = list(df_flat_db.columns) if not df_flat_db.columns.empty else FLAT_DB_COLUMNS
+            except:
+                db_cols = FLAT_DB_COLUMNS
+                
             if flat_file:
-                df_upload = pd.read_excel(flat_file, header=None)
-                # ... reuse the dynamic header mapping logic ...
+                # Read ALL sheets
+                all_sheets = pd.read_excel(flat_file, header=None, sheet_name=None)
+                
+                # --- 1. Identify and Parse Main Flat Details ---
+                df_upload = pd.DataFrame()
+                main_sheet_name = None
                 header_idx = None
-                for i, row in df_upload.iterrows():
-                    if row.astype(str).str.contains(r'Flat\s*No', case=False, na=False).any():
-                        header_idx = i; break
-                if header_idx is not None:
+                
+                for s_name, df_s in all_sheets.items():
+                    # Skip blank sheets
+                    if df_s.empty or df_s.dropna(how='all').empty:
+                        continue
+                        
+                    # Skip tenant sheet for the main db
+                    if 'tenant' in s_name.lower(): continue
+                    for i, row in df_s.iterrows():
+                        # Robust check for "Flat No", "Flat No.", "Flat No ", etc.
+                        if row.astype(str).str.contains(r'Flat\s*No\.?', case=False, na=False).any():
+                            main_sheet_name = s_name
+                            header_idx = i
+                            df_upload = df_s.copy()
+                            break
+                    if main_sheet_name: break
+                            
+                if main_sheet_name is None and list(all_sheets.keys()):
+                    # Fallback to first sheet if "Flat No" wasn't magically found
+                    main_sheet_name = list(all_sheets.keys())[0]
+                    df_upload = all_sheets[main_sheet_name]
+                    header_idx = 0
+                
+                if header_idx is not None and not df_upload.empty:
                     df_upload.columns = df_upload.iloc[header_idx]
                     df_upload = df_upload.iloc[header_idx + 1:].reset_index(drop=True)
+                    
+                    # NORMALIZE COLUMNS to match database schema
+                    # Map common Excel variations to DB column names
+                    col_map = {}
+                    for c in df_upload.columns:
+                        c_str = str(c).strip().lower()
+                        if re.search(r'flat\s*no\.?', c_str) or c_str == 'flat number': col_map[c] = 'Flat No'
+                        elif 'owner' in c_str: col_map[c] = 'Owner Name'
+                        elif 'rented' in c_str or 'status' in c_str: col_map[c] = 'Rented Status'
+                        elif 'tenant' in c_str: col_map[c] = 'Tenant Name'
+                        elif 'type' in c_str: col_map[c] = 'Flat Type'
+                        elif 'area' in c_str: col_map[c] = 'Area (sq ft)'
+                        elif 'contact' in c_str or 'phone' in c_str or 'mobile' in c_str: col_map[c] = 'Contact Number'
+                    
+                    df_upload = df_upload.rename(columns=col_map)
+                    if col_map:
+                        st.info(f"🔍 Column Mapping: {', '.join([f'\'{k}\' → \'{v}\'' for k,v in col_map.items()])}")
                 
-                # Basic schema matching (kept concise)
-                for col in df_flat_db.columns:
+                # Ensure all DB columns exist (at least as empty)
+                for col in db_cols:
                     if col not in df_upload.columns: df_upload[col] = None
-                df_flat = df_upload[df_flat_db.columns].dropna(subset=['Flat No'])
+                
+                # Filter for only the columns we expect in the DB
+                df_flat = df_upload[db_cols].dropna(subset=['Flat No']).copy()
+                
+                # Convert 'Flat No' to string to avoid numeric truncation/formatting
+                df_flat['Flat No'] = df_flat['Flat No'].astype(str).str.strip()
+                
+                # --- 2. Identify and Parse Tenant Sheet ---
+                tenant_sheet_name = None
+                t_header_idx = None
+                df_t = pd.DataFrame()
+                
+                for s_name, df_s in all_sheets.items():
+                    # Skip blank sheets
+                    if df_s.empty or df_s.dropna(how='all').empty:
+                        continue
+                        
+                    if 'tenant' in s_name.lower():
+                        for i, row in df_s.iterrows():
+                            # Robust check for "Flat No", "Flat No.", etc.
+                            if row.astype(str).str.contains(r'Flat\s*No\.?', case=False, na=False).any():
+                                tenant_sheet_name = s_name
+                                t_header_idx = i
+                                df_t = df_s.copy()
+                                break
+                        if tenant_sheet_name: break
+                        
+                if tenant_sheet_name and t_header_idx is not None:
+                    df_t.columns = df_t.iloc[t_header_idx]
+                    df_t = df_t.iloc[t_header_idx + 1:].reset_index(drop=True)
+                    # Normalize columns
+                    df_t.columns = [str(c).strip().title() for c in df_t.columns]
+                    
+                    # FILTER FOR TENANTS ONLY
+                    # Find a column containing "Resident Type", "Type", etc.
+                    type_col = next((c for c in df_t.columns if 'type' in c.lower() or 'resident' in c.lower()), None)
+                    if type_col:
+                        # Only keep rows where the Type column explicitly states "Tenant"
+                        df_t = df_t[df_t[type_col].astype(str).str.lower().str.contains('tenant', na=False)]
+                        df_t = df_t.reset_index(drop=True)
+                    
+                    st.session_state.tenant_upload_df = df_t
+                    st.info(f"📄 Discovered '{tenant_sheet_name}' sheet. Filtered {len(df_t)} true Tenant records.")
             else:
-                df_flat = df_flat_db
+                # If no file uploaded, try to show existing DB data if it was loaded
+                try:
+                    df_flat = pd.read_sql("SELECT * FROM flat_details", con=engine)
+                except:
+                    df_flat = pd.DataFrame(columns=db_cols)
+                st.session_state.tenant_upload_df = None
                 
             # Prevent float mapping issues for Contact Number column
             if 'Contact Number' in df_flat.columns:
                 df_flat['Contact Number'] = df_flat['Contact Number'].astype(str).replace('nan', '')
 
+            if df_flat.empty and flat_file:
+                st.warning("⚠️ Could not extract Flat Details from the uploaded Excel file. Is the 'Flat No' column present?")
+            
+            # De-duplicate column names before passing to data_editor to avoid Streamlit errors
+            def de_duplicate_cols(df):
+                cols = pd.Series(df.columns)
+                for dupe in cols[cols.duplicated()].unique():
+                    cols[cols == dupe] = [f"{dupe}_{i}" if i != 0 else dupe for i in range(sum(cols == dupe))]
+                df.columns = cols
+                return df
+
+            df_flat = de_duplicate_cols(df_flat)
             edited_df = st.data_editor(df_flat, num_rows="dynamic" if st.session_state.role in ["admin", "manager"] else "fixed", use_container_width=True, hide_index=True)
-            if st.session_state.role in ["admin", "manager"] and st.button("💾 Save Resident DB", type="primary"):
+            
+            # Show Tenant Preview if discovered
+            if st.session_state.tenant_upload_df is not None:
+                st.markdown("#### 👤 Discovered Tenant Data Preview")
+                st.caption("Verify this extracted tenant data before saving. It will be added to the `tenant_history` database.")
+                
+                tenant_preview = de_duplicate_cols(st.session_state.tenant_upload_df.copy())
+                st.session_state.tenant_upload_df = st.data_editor(
+                    tenant_preview, 
+                    num_rows="dynamic", 
+                    use_container_width=True, 
+                    hide_index=True,
+                    key="tenant_preview_editor"
+                )
+
+            if st.session_state.role in ["admin", "manager"] and st.button("💾 Save Resident DB & Sync Tenants", type="primary"):
+                # 1. Save Flat Details
                 edited_df.to_sql("flat_details", con=engine, if_exists="replace", index=False)
-                st.success("✅ Database updated!")
+                
+                # 2. Extract and Save Tenant History IF parsed
+                t_count = 0
+                if st.session_state.tenant_upload_df is not None and not st.session_state.tenant_upload_df.empty:
+                    df_t_save = st.session_state.tenant_upload_df
+                    
+                    with engine.begin() as conn:
+                        # Ensure table exists
+                        conn.execute(sqlalchemy.text("""
+                            CREATE TABLE IF NOT EXISTS tenant_history (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                flat_no VARCHAR(50),
+                                tenant_name VARCHAR(255),
+                                contact VARCHAR(50),
+                                from_date VARCHAR(20),
+                                to_date VARCHAR(20),
+                                rent_agreement_provided VARCHAR(10) DEFAULT 'No'
+                            )
+                        """))
+                        
+                        # Refined column mapping: Prioritize columns with 'tenant' in the name for the tenant_name field
+                        col_flat = next((c for c in df_t_save.columns if 'flat' in c.lower()), None)
+                        
+                        # Try to find a column that explicitly says "Tenant Name" or similar first
+                        col_name = next((c for c in df_t_save.columns if 'tenant' in c.lower() and 'name' in c.lower() and c != col_flat), None)
+                        if not col_name:
+                            # Fallback to any "name" column that isn't the flat number
+                            col_name = next((c for c in df_t_save.columns if 'name' in c.lower() and c != col_flat), None)
+                            
+                        col_contact = next((c for c in df_t_save.columns if 'contact' in c.lower() or 'phone' in c.lower() or 'mobile' in c.lower()), None)
+                        col_from = next((c for c in df_t_save.columns if 'from' in c.lower() or 'start' in c.lower()), None)
+                        col_to = next((c for c in df_t_save.columns if 'to' in c.lower() or 'end' in c.lower()), None)
+                        
+                        if col_flat and col_name:
+                            # 1. Identify all flats in this batch to prevent duplicates
+                            upload_flats = df_t_save[col_flat].dropna().unique().tolist()
+                            if upload_flats:
+                                # Clear existing tenant history for these specific flats to ensure a clean sync
+                                # Using format string safely here as it's a list of known values from the df
+                                flat_list_str = "', '".join([str(f).replace("'", "''") for f in upload_flats])
+                                conn.execute(sqlalchemy.text(f"DELETE FROM tenant_history WHERE flat_no IN ('{flat_list_str}')"))
+
+                            # 2. Insert new records
+                            for _, row in df_t_save.iterrows():
+                                def get_safe_val(col, max_len=None):
+                                    if not col: return None
+                                    v = row.get(col)
+                                    if isinstance(v, pd.Series):
+                                        v = v.dropna().iloc[0] if not v.dropna().empty else None
+                                    if pd.isna(v) or str(v).lower() == 'nan': return None
+                                    s = str(v).strip()
+                                    return s[:max_len] if max_len else s
+
+                                f_no = get_safe_val(col_flat, 50)
+                                t_name = get_safe_val(col_name, 255)
+                                if not f_no or not t_name: continue
+                                
+                                conn.execute(sqlalchemy.text("""
+                                    INSERT INTO tenant_history (flat_no, tenant_name, contact, from_date, to_date, rent_agreement_provided)
+                                    VALUES (:f, :n, :c, :fd, :td, :ra)
+                                """), {
+                                    "f": f_no,
+                                    "n": t_name,
+                                    "c": get_safe_val(col_contact, 50),
+                                    "fd": get_safe_val(col_from, 20),
+                                    "td": get_safe_val(col_to, 20),
+                                    "ra": "No"
+                                })
+                                t_count += 1
+                                
+                st.success(f"✅ Database updated! Synced {len(edited_df)} resident records and {t_count} tenant history records.")
         except Exception as e:
             st.error(f"Database sync error: {e}")
 
@@ -1373,6 +1754,84 @@ elif app_mode == "📤 Bulk Upload":
                         st.success(f"✅ Finished! Added {o_count} owner records and {t_count} tenant records.")
             except Exception as e:
                 st.error(f"Error processing history file: {e}")
+
+# --- Expense Tracker Menu ---
+elif app_mode == "💸 Expense Tracker":
+    st.title("💸 Expense Tracker")
+    st.markdown('<p class="info-text">View historical debit transactions and record new society expenses manually.</p>', unsafe_allow_html=True)
+    
+    # 1. Manual Expense Entry Form
+    with st.expander("➕ Add Manual Expense", expanded=False):
+        with st.form("manual_expense_form", clear_on_submit=True):
+            st.markdown("Record a new society expense that may not have appeared on the bank statement.")
+            col_e1, col_e2 = st.columns(2)
+            with col_e1:
+                e_date = st.date_input("Date of Expense", value=pd.Timestamp.now().date())
+                
+                expense_categories = ["Security", "Electricity & Water", "Housekeeping", "Repairs & Maintenance", "Admin & Legal", "Event", "Salary", "Other"]
+                e_cat = st.selectbox("Spend Type (Category)", expense_categories)
+            with col_e2:
+                e_amount = st.number_input("Amount (₹)", min_value=1.0, step=100.0)
+                e_desc = st.text_input("Description / Remarks", placeholder="e.g., Plumber visit for leak")
+                
+            e_narr = st.text_area("Internal Narration (Optional)", placeholder="Full bank narration or extra notes")
+            
+            if st.form_submit_button("📁 Save Expense", type="primary"):
+                if not e_desc:
+                    st.error("Please provide a description.")
+                else:
+                    try:
+                        engine = get_engine()
+                        with engine.begin() as conn:
+                            conn.execute(sqlalchemy.text("""
+                                INSERT INTO society_expenses 
+                                (`Date`, `Category`, `Description`, `Amount`, `Narration`)
+                                VALUES (:date, :cat, :desc, :amount, :narr)
+                            """), {
+                                "date": e_date.strftime("%Y-%m-%d"),
+                                "cat": e_cat,
+                                "desc": e_desc,
+                                "amount": e_amount,
+                                "narr": e_narr
+                            })
+                        st.success(f"✅ Successfully recorded ₹{e_amount:,.2f} under {e_cat}!")
+                        st.rerun() # Refresh page to show new data in table below
+                    except Exception as e:
+                        st.error(f"Failed to record expense: {e}")
+
+    st.markdown("---")
+    st.markdown("### 📜 Expense History")
+    
+    # 2. Display expenses table
+    try:
+        engine = get_engine()
+        df_expenses = pd.read_sql("SELECT * FROM society_expenses ORDER BY id DESC", engine)
+        if df_expenses.empty:
+            st.info("No expenses recorded yet. Wait for bank withdrawals or add one manually above.")
+        else:
+            # Clean up display
+            if 'created_at' in df_expenses.columns:
+                df_expenses['Added On'] = pd.to_datetime(df_expenses['created_at']).dt.strftime('%d %b %Y %H:%M')
+                df_expenses = df_expenses.drop(columns=['created_at'])
+                
+            # Formatting
+            st.dataframe(
+                df_expenses,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "id": st.column_config.NumberColumn("Txn ID", width="small", format="%d"),
+                    "Amount": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f"),
+                    "Description": st.column_config.TextColumn("Description", width="large"),
+                }
+            )
+            
+            # Simple summary below table
+            total_spend = df_expenses['Amount'].sum()
+            st.caption(f"**Total Historical Spend Recorded:** ₹{total_spend:,.2f}")
+            
+    except Exception as e:
+        st.error(f"Could not load expense history: {e}")
 
 # --- Flat Management Menu ---
 elif app_mode == "🏢 Flat Management":
@@ -1491,8 +1950,9 @@ elif app_mode == "🏢 Flat Management":
                     except:
                         pass
                 
-                # Fetch data
+                # Fetch data and remove exact duplicates for UI display
                 df_tenant = pd.read_sql(f"SELECT tenant_name, contact, from_date, to_date, rent_agreement_provided FROM tenant_history WHERE flat_no = '{selected_flat}'", con=engine)
+                df_tenant = df_tenant.drop_duplicates().reset_index(drop=True)
                 
                 if df_tenant.empty:
                     try:
@@ -2952,14 +3412,26 @@ elif app_mode == "📊 Report":
     st.title("📊 Financial Reports")
     st.markdown('<p class="info-text">Generate comprehensive financial summaries and defaulter lists below.</p>', unsafe_allow_html=True)
 
-    report_type = st.radio("Select Report Type", ["Defaulter List"], horizontal=True)
+    report_type = st.radio("Select Report Type", ["Defaulter List", "Individual Flat Summary"], horizontal=True)
 
     if report_type == "Defaulter List":
         st.markdown("### 📋 Defaulter List")
-        col1, col2 = st.columns(2)
+        
+        # Fetch all flats once for the filter dropdown
+        flat_list_opts = []
+        try:
+            engine = get_engine()
+            df_flats_opt = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
+            flat_list_opts = ["All"] + sorted(df_flats_opt['Flat No'].dropna().unique().tolist())
+        except:
+            flat_list_opts = ["All"]
+            
+        col1, col2, col3 = st.columns(3)
         with col1:
-            as_of_date = st.date_input("Calculation As of Date", value=pd.Timestamp.now())
+            filter_report_flat = st.selectbox("By Flat Number", flat_list_opts)
         with col2:
+            as_of_date = st.date_input("Calculation As of Date", value=pd.Timestamp.now())
+        with col3:
             threshold = st.number_input("Amount Threshold (₹)", min_value=0, value=1000, step=1000, help="Only show flats with total obligation above this amount.")
 
         if st.button("🚀 Generate Report", type="primary"):
@@ -2969,32 +3441,39 @@ elif app_mode == "📊 Report":
                 df_flats = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
                 flat_list = sorted(df_flats['Flat No'].dropna().unique().tolist())
 
+                # Apply flat filter immediately to reduce calculation time
+                if filter_report_flat != "All":
+                    flat_list = [f for f in flat_list if f == filter_report_flat]
+
                 report_data = []
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                for i, flat in enumerate(flat_list):
-                    status_text.text(f"Processing {flat}... ({i+1}/{len(flat_list)})")
-                    progress_bar.progress((i + 1) / len(flat_list))
-                    
-                    ledger = calculate_flat_ledger(flat, as_of_date=as_of_date, engine=engine)
-                    
-                    if ledger['total_obligation'] >= threshold:
-                        report_data.append({
-                            "Flat No": flat,
-                            "Owner Name": ledger['owner_name'],
-                            "Total Principal Paid": ledger['total_principle_paid'],
-                            "Total Penalty Paid": ledger['total_penalty_paid'],
-                            "Principal Due": ledger['closing_principal'],
-                            "Accumulated Penalty": ledger['accumulated_penalty'],
-                            "Total Obligation": ledger['total_obligation']
-                        })
+                if not flat_list:
+                    st.warning("No flats found matching the filter.")
+                else:
+                    for i, flat in enumerate(flat_list):
+                        status_text.text(f"Processing {flat}... ({i+1}/{len(flat_list)})")
+                        progress_bar.progress((i + 1) / len(flat_list))
+                        
+                        ledger = calculate_flat_ledger(flat, as_of_date=as_of_date, engine=engine)
+                        
+                        if ledger['total_obligation'] >= threshold:
+                            report_data.append({
+                                "Flat No": flat,
+                                "Owner Name": ledger['owner_name'],
+                                "Total Principal Paid": ledger['total_principle_paid'],
+                                "Total Penalty Paid": ledger['total_penalty_paid'],
+                                "Principal Due": ledger['closing_principal'],
+                                "Accumulated Penalty": ledger['accumulated_penalty'],
+                                "Total Obligation": ledger['total_obligation']
+                            })
 
-                progress_bar.empty()
-                status_text.empty()
+                    progress_bar.empty()
+                    status_text.empty()
 
                 if not report_data:
-                    st.info("No defaulters found based on your filters.")
+                    st.info(f"No defaulters found with obligation > ₹{threshold:,}.")
                 else:
                     df_report = pd.DataFrame(report_data)
                     st.success(f"Found {len(df_report)} defaulters.")
@@ -3020,9 +3499,47 @@ elif app_mode == "📊 Report":
                         file_name=f"Defaulter_Report_{as_of_date.strftime('%Y-%m-%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-
             except Exception as e:
                 st.error(f"Error generating report: {e}")
+
+    elif report_type == "Individual Flat Summary":
+        st.markdown("### 🏠 Individual Flat Summary")
+        
+        # Populate flat list
+        flat_list = []
+        try:
+            engine = get_engine()
+            df_f = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
+            flat_list = sorted([str(f).strip() for f in df_f['Flat No'].dropna().unique()])
+        except: pass
+
+        selected_f_rep = st.selectbox("Select Flat", ["-- Select Flat --"] + flat_list)
+        
+        if selected_f_rep != "-- Select Flat --":
+            try:
+                engine = get_engine()
+                # Run calculation as of today
+                ledger = calculate_flat_ledger(selected_f_rep, as_of_date=pd.Timestamp.now(), engine=engine)
+                
+                total_obl = ledger.get('total_obligation', 0)
+                
+                st.markdown("---")
+                st.write(f"#### Total Obligation for {selected_f_rep}")
+                st.markdown(f"""
+                <div style="background-color: #1e1e1e; padding: 20px; border-radius: 10px; border-left: 5px solid #fca311; margin: 10px 0;">
+                    <h1 style="color: #fca311; margin: 0;">₹ {total_obl:,.2f}</h1>
+                    <p style="color: #888; margin: 5px 0 0 0;">Total outstanding as of today (Principal + Penalty)</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Redirect Button
+                if st.button("🏢 Go to Maintenance Calculator", type="primary", use_container_width=True):
+                    st.session_state.app_mode = "🏢 Flat Management"
+                    st.session_state.shared_flat_selector = selected_f_rep
+                    st.rerun()
+                    
+            except Exception as e:
+                st.error(f"Error fetching obligation: {e}")
 
 elif app_mode == "🔑 Change Password":
     st.title("🔑 Change Your Password")
