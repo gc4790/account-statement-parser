@@ -83,6 +83,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data
 def load_settings():
     default_settings = {
         "base_maintenance": 2500.0,
@@ -107,9 +108,11 @@ def load_settings():
 def save_settings(settings):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=4)
+    st.cache_data.clear()
 
 DB_CONFIG_FILE = os.path.join(BASE_DIR, "db_config.json")
 
+@st.cache_data
 def load_db_config():
     default = {"host": "localhost", "port": "3306", "user": "root", "password": "root", "database": "society_plus", "use_ssl": False}
     if os.path.exists(DB_CONFIG_FILE):
@@ -123,8 +126,11 @@ def load_db_config():
 def save_db_config(cfg):
     with open(DB_CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=4)
+    st.cache_data.clear()
+    st.cache_resource.clear()
 
 
+@st.cache_resource
 def get_engine():
     """Create a SQLAlchemy engine. Checks Streamlit secrets first for cloud deployments, then falls back to local db_config.json."""
     # 1. Try Streamlit Secrets First (For Cloud/Deployed Environments)
@@ -139,8 +145,8 @@ def get_engine():
             
             _url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
             if use_ssl:
-                return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
-            return sqlalchemy.create_engine(_url)
+                return sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}}, pool_size=10, max_overflow=20, pool_pre_ping=True, pool_recycle=3600)
+            return sqlalchemy.create_engine(_url, pool_size=10, max_overflow=20, pool_pre_ping=True, pool_recycle=3600)
     except Exception:
         pass # Not running in a Streamlit context where secrets are available, or no secrets defined
 
@@ -150,9 +156,9 @@ def get_engine():
     
     try:
         if _c.get("use_ssl", False):
-            engine = sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}})
+            engine = sqlalchemy.create_engine(_url, connect_args={"ssl": {"ssl_mode": "VERIFY_IDENTITY"}}, pool_size=10, max_overflow=20, pool_pre_ping=True, pool_recycle=3600)
         else:
-            engine = sqlalchemy.create_engine(_url)
+            engine = sqlalchemy.create_engine(_url, pool_size=10, max_overflow=20, pool_pre_ping=True, pool_recycle=3600)
         # Test connection quickly immediately
         with engine.connect() as conn:
             pass
@@ -162,6 +168,138 @@ def get_engine():
         safe_url = _url.replace(_c['password'], "*****")
         st.error(f"Failed configuring engine with {safe_url}")
         raise e
+
+def calculate_batch_defaulters(as_of_date=None, engine=None):
+    """
+    Experimental high-performance batch calculator.
+    Fetches all data in a few large queries and processes society state in memory.
+    Reduces 400+ potential queries to ~5.
+    """
+    if engine is None: engine = get_engine()
+    settings = load_settings()
+    
+    # 1. Constants
+    owner_dues = float(settings.get("base_maintenance", 2500.0))
+    tenant_dues = float(settings.get("tenant_maintenance", 3000.0))
+    penalty_apr = float(settings.get("penalty_apr", 18.0))
+    grace_day = int(settings.get("grace_period_day", 10))
+    monthly_interest_rate = penalty_apr / 12 / 100
+    PENALTY_START = pd.Timestamp(2023, 10, 1)
+    
+    # 2. Fetch all data in bulk
+    with engine.connect() as conn:
+        df_flats = pd.read_sql("SELECT `Flat No`, `Owner Name`, `Rented Status` FROM flat_details", conn)
+        df_cf = pd.read_sql("SELECT `Flat Number`, `Outstanding` FROM flat_carry_forward", conn)
+        df_payments = pd.read_sql("SELECT `Flat Number`, `Amount`, `Date` FROM payment_history", conn)
+        df_conc = pd.read_sql("SELECT flat_no, start_month, tenure_months, discount_percent FROM flat_concessions", conn)
+        # Fallback for carry forward from payment_history (very first record per flat)
+        df_fallback_cf = pd.read_sql("""
+            SELECT `Flat Number`, `Outstanding` 
+            FROM payment_history 
+            WHERE id IN (SELECT MIN(id) FROM payment_history GROUP BY `Flat Number`)
+        """, conn)
+
+    # 3. Create lookup maps
+    cf_map = dict(zip(df_cf['Flat Number'], df_cf['Outstanding']))
+    fallback_cf_map = dict(zip(df_fallback_cf['Flat Number'], df_fallback_cf['Outstanding']))
+    
+    # Process payments: {flat: {month_label: sum}}
+    df_payments['Date'] = pd.to_datetime(df_payments['Date'], errors='coerce')
+    df_payments = df_payments.dropna(subset=['Date'])
+    payment_map = {}
+    for _, r in df_payments.iterrows():
+        f = r['Flat Number']
+        m_key = r['Date'].strftime('%b %Y')
+        if f not in payment_map: payment_map[f] = {}
+        payment_map[f][m_key] = payment_map[f].get(m_key, 0.0) + float(r['Amount'])
+        
+    # Process concessions: {flat: [{"start": dt, "end": dt, "discount": float}]}
+    conc_map = {}
+    for _, r in df_conc.iterrows():
+        f = r['flat_no']
+        try:
+            c_start = pd.to_datetime(r['start_month'], format='%b %Y')
+            c_end = c_start + pd.DateOffset(months=int(r['tenure_months']) - 1)
+            if f not in conc_map: conc_map[f] = []
+            conc_map[f].append({"start": c_start, "end": c_end, "discount": float(r['discount_percent'])})
+        except: pass
+
+    # 4. Build Timeline
+    if as_of_date is None: as_of_date = pd.Timestamp.now()
+    else: as_of_date = pd.to_datetime(as_of_date)
+    start_date = pd.Timestamp(2023, 4, 1)
+    months = []
+    cur = start_date
+    while cur.replace(day=1) <= as_of_date.replace(day=1):
+        months.append(cur)
+        if cur.month == 12: cur = cur.replace(year=cur.year + 1, month=1)
+        else: cur = cur.replace(month=cur.month + 1)
+
+    report_data = []
+    _now = pd.Timestamp.now()
+
+    # 5. Core Calculation Engine (In-Memory)
+    for _, f_row in df_flats.iterrows():
+        flat_no = f_row['Flat No']
+        is_rented = str(f_row['Rented Status']).strip().upper() in ["Y", "YES"]
+        base_fee = tenant_dues if is_rented else owner_dues
+        
+        # Determine Starting Position
+        forward_p = float(cf_map.get(flat_no, fallback_cf_map.get(flat_no, 0.0)))
+        flat_p_map = payment_map.get(flat_no, {})
+        flat_concs = conc_map.get(flat_no, [])
+        
+        acc_penalty = 0.0
+        total_p_paid = 0.0
+        total_pen_paid = 0.0
+        
+        for m_dt in months:
+            m_label = m_dt.strftime('%b %Y')
+            payment = flat_p_map.get(m_label, 0.0)
+            
+            # Apply concession
+            current_dues = base_fee
+            for c in flat_concs:
+                if c["start"].replace(day=1) <= m_dt.replace(day=1) <= c["end"].replace(day=1):
+                    current_dues = base_fee * (1 - c["discount"] / 100.0)
+                    break
+            
+            total_req = forward_p + current_dues
+            rem_pay = payment
+            
+            # Standard Deduction Logic: Penalties First
+            if rem_pay > 0 and acc_penalty > 0:
+                if rem_pay >= acc_penalty:
+                    total_pen_paid += acc_penalty
+                    rem_pay -= acc_penalty
+                    acc_penalty = 0.0
+                else:
+                    total_pen_paid += rem_pay
+                    acc_penalty -= rem_pay
+                    rem_pay = 0.0
+            
+            total_p_paid += rem_pay
+            p_after = total_req - rem_pay
+            
+            # Penalty Accrual
+            if p_after > 0 and m_dt >= PENALTY_START:
+                is_cur_month = (m_dt.year == _now.year and m_dt.month == _now.month)
+                if not (is_cur_month and _now.day < grace_day):
+                    acc_penalty += p_after * monthly_interest_rate
+            
+            forward_p = p_after
+            
+        report_data.append({
+            "Flat No": flat_no,
+            "Owner Name": f_row['Owner Name'],
+            "Total Principal Paid": round(total_p_paid, 2),
+            "Total Penalty Paid": round(total_pen_paid, 2),
+            "Principal Due": round(forward_p, 2),
+            "Accumulated Penalty": round(acc_penalty, 2),
+            "Total Obligation": round(forward_p + acc_penalty, 2)
+        })
+        
+    return report_data
 
 def calculate_flat_ledger(flat_no, as_of_date=None, engine=None):
     """
@@ -1337,6 +1475,20 @@ if app_mode == "🔍 Transaction Search":
                                     "ref": m_narration[:200] if m_narration else None
                                 })
                                 _conn.commit()
+                            
+                            # Sync to live metrics
+                            try:
+                                res = calculate_flat_ledger(m_flat, engine=engine)
+                                new_out = res['total_obligation']
+                                with engine.begin() as _conn2:
+                                    _conn2.execute(sqlalchemy.text("""
+                                        INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
+                                        VALUES (:f, :o)
+                                        ON DUPLICATE KEY UPDATE `Outstanding` = :o
+                                    """), {"f": m_flat, "o": new_out})
+                            except Exception as e_sync:
+                                st.warning(f"Payment saved, but failed to sync metrics: {e_sync}")
+
                             st.success(f"✅ ₹{m_amount:,.2f} added to {m_flat} for {m_month_label}!")
                             st.session_state.calc_key += 1 # force refresh ledger if it's open
                         except Exception as e:
@@ -2143,6 +2295,74 @@ elif app_mode == "🏢 Flat Management":
         selected_year = fy_start_options[fy_labels.index(selected_fy_label)] if not all_years_mode else fy_start_options[0]
 
         summary_container = st.container()
+        
+        # --- Manual Payment Expander (User Requested) ---
+        if st.session_state.role in ["admin", "manager"]:
+            with st.expander("➕ Add Manual Payment", expanded=False):
+                with st.form(f"manual_pay_form_{selected_flat}"):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        m_date = st.date_input("Payment Date", value=pd.Timestamp.now().date(), key=f"m_date_{selected_flat}")
+                    
+                    # Intelligent defaults for manual payment month/year
+                    _months_list = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
+                    _default_month_idx = 0
+                    if m_date:
+                        _abbr = m_date.strftime("%b")
+                        if _abbr in _months_list:
+                            _default_month_idx = _months_list.index(_abbr)
+                        _default_year = m_date.year
+                    else:
+                        _default_year = pd.Timestamp.now().year
+
+                    with c2:
+                        m_amount = st.number_input("Amount (₹)", min_value=1.0, step=100.0, key=f"m_amt_{selected_flat}")
+                        m_month = st.selectbox("For Ledger Month", _months_list, index=_default_month_idx, key=f"m_mon_{selected_flat}")
+                    with c3:
+                        m_year = st.number_input("For Ledger Year", min_value=2023, max_value=2030, value=_default_year, step=1, key=f"m_yr_{selected_flat}")
+                        m_narration = st.text_input("Narration / UTR Reference", key=f"m_nar_{selected_flat}")
+                        
+                    if st.form_submit_button("💾 Save Payment", type="primary", use_container_width=True):
+                        if not m_date:
+                            st.error("❌ Please select a payment date.")
+                        else:
+                            m_date_str = m_date.strftime("%Y-%m-%d %H:%M:%S")
+                            m_month_label = f"{m_month} {m_year}"
+                            try:
+                                engine = get_engine()
+                                with engine.connect() as _conn:
+                                    _conn.execute(sqlalchemy.text("""
+                                        INSERT INTO payment_history 
+                                        (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                        VALUES (:flat, :month, :date, :narration, :amount, 0, :ref)
+                                    """), {
+                                        "flat": selected_flat,
+                                        "month": m_month_label,
+                                        "date": m_date_str,
+                                        "narration": m_narration,
+                                        "amount": m_amount,
+                                        "ref": m_narration[:200] if m_narration else None
+                                    })
+                                    _conn.commit()
+                                
+                                # Sync to live metrics table
+                                try:
+                                    res = calculate_flat_ledger(selected_flat, engine=engine)
+                                    new_out = res['total_obligation']
+                                    with engine.begin() as _conn2:
+                                        _conn2.execute(sqlalchemy.text("""
+                                            INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
+                                            VALUES (:f, :o)
+                                            ON DUPLICATE KEY UPDATE `Outstanding` = :o
+                                        """), {"f": selected_flat, "o": new_out})
+                                except Exception as e_sync:
+                                    st.warning(f"Payment saved, but failed to sync metrics: {e_sync}")
+
+                                st.success(f"✅ ₹{m_amount:,.2f} added to {selected_flat}!")
+                                st.session_state.calc_key += 1 # force refresh
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ DB Error: {e}")
 
         # Build month list helper — all FYs are Apr–Mar (Indian FY)
         # FY 2023-24 starts from Apr 2023 naturally; Jan/Feb/Mar 2024 are valid tail months
@@ -3446,31 +3666,17 @@ elif app_mode == "📊 Report":
                     flat_list = [f for f in flat_list if f == filter_report_flat]
 
                 report_data = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-
-                if not flat_list:
-                    st.warning("No flats found matching the filter.")
-                else:
-                    for i, flat in enumerate(flat_list):
-                        status_text.text(f"Processing {flat}... ({i+1}/{len(flat_list)})")
-                        progress_bar.progress((i + 1) / len(flat_list))
-                        
-                        ledger = calculate_flat_ledger(flat, as_of_date=as_of_date, engine=engine)
-                        
-                        if ledger['total_obligation'] >= threshold:
-                            report_data.append({
-                                "Flat No": flat,
-                                "Owner Name": ledger['owner_name'],
-                                "Total Principal Paid": ledger['total_principle_paid'],
-                                "Total Penalty Paid": ledger['total_penalty_paid'],
-                                "Principal Due": ledger['closing_principal'],
-                                "Accumulated Penalty": ledger['accumulated_penalty'],
-                                "Total Obligation": ledger['total_obligation']
-                            })
-
-                    progress_bar.empty()
-                    status_text.empty()
+                with st.status("🚀 Running Society-wide High Performance Calculation...", expanded=True) as status:
+                    # Run bulk calculation
+                    full_report = calculate_batch_defaulters(as_of_date=as_of_date, engine=engine)
+                    
+                    # Apply filters
+                    if filter_report_flat != "All":
+                        full_report = [r for r in full_report if r["Flat No"] == filter_report_flat]
+                    
+                    report_data = [r for r in full_report if r["Total Obligation"] >= threshold]
+                    
+                    status.update(label=f"Calculation complete! Processed {len(full_report)} flats in memory.", state="complete", expanded=False)
 
                 if not report_data:
                     st.info(f"No defaulters found with obligation > ₹{threshold:,}.")
