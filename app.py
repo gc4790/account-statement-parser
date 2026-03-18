@@ -3078,6 +3078,7 @@ elif app_mode == "📤 Upload Payments":
                     
                     # --- Save button: sends only approved rows ---
                     st.markdown("---")
+                    do_update_cf = st.checkbox("Update Carry Forward Balance", value=True, help="Update the 'flat_carry_forward' table with the first outstanding value from each sheet.")
                     if st.button("💾 Save Approved Payments to Database", type="primary"):
                         try:
                             import sqlalchemy
@@ -3176,22 +3177,23 @@ elif app_mode == "📤 Upload Payments":
                                         # Use the pre-filter first row Outstanding captured during parsing
                                         # (NOT groupby on filtered data — that picks wrong rows like September)
                                         cf_saved = 0
-                                        for sheet_name in all_edited.keys():
-                                            cf_key = f"__cf_{sheet_name}"
-                                            if cf_key in parsed_sheets:
-                                                first_outstanding = parsed_sheets[cf_key]
-                                                try:
-                                                    conn.execute(sqlalchemy.text("""
-                                                        INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
-                                                        VALUES (:flat, :outstanding)
-                                                        ON DUPLICATE KEY UPDATE `Outstanding` = VALUES(`Outstanding`)
-                                                    """), {
-                                                        "flat": sheet_name,
-                                                        "outstanding": float(first_outstanding),
-                                                    })
-                                                    cf_saved += 1
-                                                except Exception:
-                                                    pass
+                                        if do_update_cf:
+                                            for sheet_name in all_edited.keys():
+                                                cf_key = f"__cf_{sheet_name}"
+                                                if cf_key in parsed_sheets:
+                                                    first_outstanding = parsed_sheets[cf_key]
+                                                    try:
+                                                        conn.execute(sqlalchemy.text("""
+                                                            INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
+                                                            VALUES (:flat, :outstanding)
+                                                            ON DUPLICATE KEY UPDATE `Outstanding` = VALUES(`Outstanding`)
+                                                        """), {
+                                                            "flat": sheet_name,
+                                                            "outstanding": float(first_outstanding),
+                                                        })
+                                                        cf_saved += 1
+                                                    except Exception:
+                                                        pass
                                         conn.commit()
                                  
                                 skipped = len(skipped_rows)
