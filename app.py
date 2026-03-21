@@ -691,7 +691,7 @@ st.sidebar.divider()
 st.sidebar.markdown("## 🧭 Navigation")
 
 # Hide Settings from Viewer role
-nav_options = ["📊 Dashboard", "🔍 Transaction Search", "🏢 Flat Management"]
+nav_options = ["📊 Dashboard", "🔍 Transaction Search", "🔎 Search", "🏢 Flat Management"]
 if st.session_state.role in ["admin", "manager"]:
     nav_options.append("💸 Expense Tracker")
     nav_options.append("📤 Bulk Upload")
@@ -1557,7 +1557,18 @@ elif app_mode == "📤 Bulk Upload":
                                         
                                 if header_idx is not None and start_col_idx is not None:
                                     clean_df = df_sheet.iloc[header_idx + 1:, start_col_idx : start_col_idx + 9].copy()
-                                    clean_df.columns = ["Month", "Last Month Interest", "Outstanding", "Monthly Dues", "Date", "Narration", "Amount", "Balance", "Interest"]
+                                    clean_df.columns = df_sheet.iloc[header_idx, start_col_idx : start_col_idx + 9].astype(str).str.strip()
+                                    
+                                    clean_headers = ["Month", "Last Month Interest", "Outstanding", "Monthly Dues", "Date", "Narration", "Amount", "Balance", "Interest"]
+                                    if len(clean_df.columns) == 9:
+                                        clean_df.columns = clean_headers
+                                    else:
+                                        from collections import Counter
+                                        counts = Counter()
+                                        new_cols = []
+                                        for col in clean_df.columns:
+                                            new_cols.append(f"{col}_{counts[col]}" if counts[col] > 0 else col)
+                                        clean_df.columns = new_cols
                                     
                                     clean_df = clean_df.dropna(how='all')
                                     if "Date" in clean_df.columns:
@@ -1565,48 +1576,234 @@ elif app_mode == "📤 Bulk Upload":
                                     if "Amount" in clean_df.columns:
                                         clean_df["Amount"] = pd.to_numeric(clean_df["Amount"], errors='coerce').fillna(0)
                                     
+                                    # Fill blank Month from Date (e.g. "2023-04-30" → "Apr")
+                                    if "Month" in clean_df.columns and "Date" in clean_df.columns:
+                                        def derive_month(row):
+                                            val = str(row.get("Month", "")).strip().lower()
+                                            if val in ["", "nan", "none"]:
+                                                date_val = str(row.get("Date", "")).strip()
+                                                try:
+                                                    return pd.to_datetime(date_val).strftime('%b')
+                                                except:
+                                                    return ""
+                                            return row["Month"]
+                                        clean_df["Month"] = clean_df.apply(derive_month, axis=1)
+
+                                        
+                                    # Capture Outstanding column for carry-forward
+                                    if "Outstanding" in clean_df.columns:
+                                        clean_df["Outstanding"] = pd.to_numeric(clean_df["Outstanding"], errors='coerce').fillna(0)
+                                    else:
+                                        clean_df["Outstanding"] = 0.0
+
+                                    # *** Capture carry-forward from the VERY FIRST row BEFORE Amount filter ***
+                                    # The first row in the Excel typically has the opening outstanding balance
+                                    # (it may have Amount=0 and would be lost after filtering)
                                     first_outstanding_val = float(clean_df.iloc[0]["Outstanding"]) if len(clean_df) > 0 else 0.0
-                                    
-                                    final_df = clean_df[["Month", "Date", "Narration", "Amount", "Outstanding"]].copy()
-                                    final_df["Amount"] = pd.to_numeric(final_df["Amount"], errors='coerce').fillna(0)
-                                    final_df["Outstanding"] = pd.to_numeric(final_df["Outstanding"], errors='coerce').fillna(0)
+
+                                    keep_cols = [c for c in ["Month", "Date", "Narration", "Amount", "Outstanding"] if c in clean_df.columns]
+                                    final_df = clean_df[keep_cols].copy()
                                     final_df.insert(0, "Flat Number", sheet)
-                                    final_df = final_df[final_df["Amount"] > 0].reset_index(drop=True)
-                                    
+                                    if "Amount" in final_df.columns:
+                                        final_df = final_df[final_df["Amount"] > 0].reset_index(drop=True)
+
+                                    # Store the pre-filter first outstanding keyed by sheet name
                                     parsed_sheets[sheet] = final_df
                                     parsed_sheets[f"__cf_{sheet}"] = first_outstanding_val
-                            except Exception as e:
-                                st.error(f"Error parsing flat {sheet}: {e}")
-
-                        approve_all = st.checkbox("Select All Payments", key="approve_all_bulk")
+                            except Exception as sheet_err:
+                                st.error(f"Could not parse flat {sheet}: {sheet_err}")
+                        
+                        # --- Single Approve All checkbox above all tables ---
+                        approve_all = st.checkbox("Approve All Payments", key="approve_all_global_bulk")
+                        
+                        # --- Render each sheet with per-row Approved checkboxes ---
                         all_edited = {}
                         for sheet, final_df in parsed_sheets.items():
-                            if sheet.startswith("__cf_"): continue
-                            final_df.insert(0, "Approved", approve_all)
-                            edited_df = st.data_editor(final_df, use_container_width=True, hide_index=True, key=f"bulk_pay_{sheet}")
+                            if sheet.startswith("__cf_"):
+                                continue  # skip carry-forward float entries
+                            st.markdown(f"#### 📄 Data for Flat: **{sheet}**")
+                            final_df.insert(0, "Approved", approve_all)  # pre-fill based on master checkbox
+                            edited_df = st.data_editor(
+                                final_df,
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "Approved": st.column_config.CheckboxColumn(
+                                        "Approved",
+                                        help="Tick to approve this payment. Use the header checkbox to approve all."
+                                    ),
+                                },
+                                key=f"pay_editor_{sheet}_bulk"
+                            )
+                            approved_count = int(edited_df["Approved"].sum())
+                            st.markdown(
+                                f"<span style='color:#00f0ff;font-size:0.9rem;'>🔢 {approved_count} of {len(edited_df)} payment(s) selected</span>",
+                                unsafe_allow_html=True
+                            )
+                            
+                            # --- Show duplicate transactions (already in DB) ---
+                            try:
+                                import sqlalchemy as _sa
+                                _engine = get_engine()
+                                with _engine.connect() as _conn:
+                                    # Check which rows from this sheet already exist in DB
+                                    dup_rows = []
+                                    for _, row in edited_df.iterrows():
+                                        exists = _conn.execute(_sa.text("""
+                                            SELECT 1 FROM payment_history
+                                            WHERE `Flat Number`=:flat AND `Month`=:month AND `Date`=:date AND `Amount`=:amount
+                                            LIMIT 1
+                                        """), {
+                                            "flat": row.get("Flat Number", ""),
+                                            "month": row.get("Month", ""),
+                                            "date": str(row.get("Date", "")),
+                                            "amount": float(row.get("Amount", 0))
+                                        }).fetchone()
+                                        if exists:
+                                            dup_rows.append(row.drop(labels=["Approved"]))
+                                            
+                                    if dup_rows:
+                                        dup_df = pd.DataFrame(dup_rows).reset_index(drop=True)
+                                        st.warning(f"⚠️ {len(dup_rows)} transaction(s) already exist in DB (will be skipped on save):")
+                                        st.dataframe(dup_df, use_container_width=True, hide_index=True)
+                            except Exception:
+                                pass  # silently skip if DB not reachable
+                            
                             all_edited[sheet] = edited_df
 
-                        if st.button("💾 Save to Database", type="primary"):
-                            rows_to_save = [df[df["Approved"]].drop(columns=["Approved"]) for df in all_edited.values()]
-                            combined = pd.concat(rows_to_save, ignore_index=True) if rows_to_save else pd.DataFrame()
-                            if not combined.empty:
-                                try:
-                                    with engine.connect() as conn:
-                                        inserted = 0
-                                        for _, row in combined.iterrows():
-                                            res = conn.execute(sqlalchemy.text("""
-                                                INSERT IGNORE INTO payment_history 
-                                                (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`)
-                                                VALUES (:flat, :month, :date, :narration, :amount, :outstanding)
-                                            """), {
-                                                "flat": row["Flat Number"], "month": row["Month"], "date": str(row["Date"]),
-                                                "narration": row["Narration"], "amount": float(row["Amount"]), "outstanding": float(row["Outstanding"])
-                                            })
-                                            if res.rowcount > 0: inserted += 1
-                                        conn.commit()
-                                    st.success(f"✅ {inserted} payments saved!")
-                                except Exception as e:
-                                    st.error(f"DB Error: {e}")
+                        
+                        # --- Save button: sends only approved rows ---
+                        st.markdown("---")
+                        do_update_cf = st.checkbox("Update Carry Forward Balance", value=True, help="Update the 'flat_carry_forward' table with the first outstanding value from each sheet.")
+                        if st.button("💾 Save Approved Payments to Database", type="primary"):
+                            try:
+                                import sqlalchemy
+                                engine = get_engine()
+                                rows_to_save = []
+                                for sheet, edited_df in all_edited.items():
+                                    approved_rows = edited_df[edited_df["Approved"] == True].drop(columns=["Approved"])
+                                    rows_to_save.append(approved_rows)
+                                combined = pd.concat(rows_to_save, ignore_index=True) if rows_to_save else pd.DataFrame()
+                                if len(combined) > 0:
+                                    with st.spinner("Saving to MySQL..."):
+                                        
+                                        # Extract UTR/reference from Narration
+                                        # Priority: pure numeric tokens (10+ digits) like IMPS UTR
+                                        # Fallback: last alphanumeric token that contains digits (NEFT UTR like AXMB231969016421)
+                                        def extract_utr(narration):
+                                            import re
+                                            if not narration or str(narration).strip() in ["", "nan"]:
+                                                return None
+                                            s = str(narration).upper()
+                                            # 1st priority: pure numeric sequence of 10+ digits (IMPS UTR)
+                                            numeric_tokens = re.findall(r'\b\d{10,}\b', s)
+                                            if numeric_tokens:
+                                                return numeric_tokens[0]
+                                            # 2nd priority: alphanumeric token containing digits (NEFT-style UTR)
+                                            mixed_tokens = [t for t in re.findall(r'[A-Z0-9]{8,}', s) if any(c.isdigit() for c in t)]
+                                            if mixed_tokens:
+                                                return mixed_tokens[-1]
+                                            return None
+                                        
+                                        combined["narration_ref"] = combined.get("Narration", pd.Series([""] * len(combined))).apply(extract_utr)
+                                        
+                                        with engine.connect() as conn:
+                                            # Composite unique key: (Flat Number, Month, Date, Amount)
+                                            # narration_ref stored for reference but NOT used as unique key
+                                            # Create payment_history with Outstanding column
+                                            conn.execute(sqlalchemy.text("""
+                                                CREATE TABLE IF NOT EXISTS payment_history (
+                                                    id INT AUTO_INCREMENT PRIMARY KEY,
+                                                    `Flat Number` VARCHAR(50),
+                                                    `Month` VARCHAR(20),
+                                                    `Date` VARCHAR(20),
+                                                    `Narration` TEXT,
+                                                    `Amount` DECIMAL(12,2),
+                                                    `Outstanding` DECIMAL(12,2) DEFAULT 0,
+                                                    `narration_ref` VARCHAR(100),
+                                                    UNIQUE KEY uq_payment (`Flat Number`, `Month`, `Date`, `Amount`)
+                                                )
+                                            """))
+                                            # Add Outstanding column if it doesn't exist yet (migration)
+                                            try:
+                                                conn.execute(sqlalchemy.text("""
+                                                    ALTER TABLE payment_history
+                                                    ADD COLUMN IF NOT EXISTS `Outstanding` DECIMAL(12,2) DEFAULT 0
+                                                """))
+                                            except Exception:
+                                                pass  # column already exists
+                                            # Create carry-forward table
+                                            conn.execute(sqlalchemy.text("""
+                                                CREATE TABLE IF NOT EXISTS flat_carry_forward (
+                                                    id INT AUTO_INCREMENT PRIMARY KEY,
+                                                    `Flat Number` VARCHAR(50) UNIQUE,
+                                                    `Outstanding` DECIMAL(12,2) DEFAULT 0,
+                                                    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                                                )
+                                            """))
+                                            conn.commit()
+                                            
+                                            # Insert row by row using INSERT IGNORE to skip duplicates
+                                            inserted = 0
+                                            skipped_rows = []
+                                            for _, row in combined.iterrows():
+                                                try:
+                                                    result = conn.execute(sqlalchemy.text("""
+                                                        INSERT IGNORE INTO payment_history 
+                                                        (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
+                                                        VALUES (:flat, :month, :date, :narration, :amount, :outstanding, :ref)
+                                                    """), {
+                                                        "flat": row.get("Flat Number", ""),
+                                                        "month": row.get("Month", ""),
+                                                        "date": str(row.get("Date", "")),
+                                                        "narration": row.get("Narration", ""),
+                                                        "amount": float(row.get("Amount", 0)),
+                                                        "outstanding": float(row.get("Outstanding", 0)),
+                                                        "ref": row.get("narration_ref", None)
+                                                    })
+                                                    if result.rowcount > 0:
+                                                        inserted += 1
+                                                    else:
+                                                        skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
+                                                except Exception:
+                                                    skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
+                                            conn.commit()
+
+                                            # --- Store first Outstanding per flat into flat_carry_forward ---
+                                            # Use the pre-filter first row Outstanding captured during parsing
+                                            # (NOT groupby on filtered data — that picks wrong rows like September)
+                                            cf_saved = 0
+                                            if do_update_cf:
+                                                for sheet_name in all_edited.keys():
+                                                    cf_key = f"__cf_{sheet_name}"
+                                                    if cf_key in parsed_sheets:
+                                                        first_outstanding = parsed_sheets[cf_key]
+                                                        try:
+                                                            conn.execute(sqlalchemy.text("""
+                                                                INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
+                                                                VALUES (:flat, :outstanding)
+                                                                ON DUPLICATE KEY UPDATE `Outstanding` = VALUES(`Outstanding`)
+                                                            """), {
+                                                                "flat": sheet_name,
+                                                                "outstanding": float(first_outstanding),
+                                                            })
+                                                            cf_saved += 1
+                                                        except Exception:
+                                                            pass
+                                            conn.commit()
+                                     
+                                    skipped = len(skipped_rows)
+                                    st.success(f"✅ {inserted} payment(s) saved. {skipped} duplicate(s) skipped.")
+                                    st.info(f"📌 Carry forward amount stored/updated for {cf_saved} flat(s).")
+                                    if skipped_rows:
+                                        st.warning(f"⚠️ The following {skipped} transaction(s) were skipped (already in DB):")
+                                        skipped_df = pd.DataFrame(skipped_rows).reset_index(drop=True)
+                                        st.dataframe(skipped_df, use_container_width=True, hide_index=True)
+
+                                else:
+                                    st.warning("⚠️ No payments selected. Tick at least one row before saving.")
+                            except Exception as db_err:
+                                st.error(f"❌ Failed to save to database: {db_err}")
             except Exception as e:
                 st.error(f"File Error: {e}")
 
@@ -2903,316 +3100,6 @@ elif app_mode == "🏢 Flat Management":
                 st.markdown("---")
 
 
-# --- Upload Payments Menu ---
-elif app_mode == "📤 Upload Payments":
-    st.title("📤 Manage Payment Details")
-    st.markdown('<p class="info-text">Upload payment files and search for specific flat details.</p>', unsafe_allow_html=True)
-    
-    st.markdown("### 📥 Upload Payment File")
-    st.info("Upload an Excel file containing payment details.")
-    
-    pay_file = st.file_uploader("Upload Resident Payments (.xls / .xlsx)", type=["xls", "xlsx"], key="payment_upload")
-    
-    if pay_file is not None:
-        try:
-            with st.spinner("Processing file..."):
-                xl = pd.ExcelFile(pay_file)
-                sheet_names = [s for s in xl.sheet_names if s.strip().lower() not in ["master", "total"]]
-                
-            st.success(f"✅ File loaded successfully! Found {len(sheet_names)} payment sheets.")
-            
-            st.markdown("### 🔍 Search Payments")
-            search_flat = st.text_input("Enter Flat Number (e.g., C1-1101, A-104)", placeholder="Search for a flat...")
-            
-            if search_flat:
-                search_query = search_flat.strip().upper().replace(" ", "")
-                
-                # Simple exact match or contains match on sheet names
-                matching_sheets = [s for s in sheet_names if search_query in s.strip().upper().replace(" ", "")]
-                
-                if matching_sheets:
-                    st.write(f"Found {len(matching_sheets)} matching flat(s):")
-                    
-                    # --- Parse all matching sheets first ---
-                    parsed_sheets = {}  # sheet_name -> final_df
-                    for sheet in matching_sheets:
-                        try:
-                            df_sheet = pd.read_excel(xl, sheet_name=sheet, header=None)
-                            
-                            header_idx = None
-                            start_col_idx = None
-                            
-                            def is_start_col(c):
-                                cell_str = str(c).strip().lower()
-                                return cell_str.startswith('year') or cell_str == 'month' or cell_str.startswith('column')
-                            
-                            for i, row in df_sheet.iterrows():
-                                row_str = row.astype(str).str.lower().tolist()
-                                year_month_present = any(is_start_col(cell) for cell in row_str)
-                                amount_present = any(str(cell).strip().lower() == 'amount' for cell in row_str)
-                                if year_month_present and amount_present:
-                                    header_idx = i
-                                    for j, cell in enumerate(row_str):
-                                        if is_start_col(cell):
-                                            start_col_idx = j
-                                            break
-                                    break
-                                    
-                            if header_idx is not None and start_col_idx is not None:
-                                clean_df = df_sheet.iloc[header_idx + 1:, start_col_idx : start_col_idx + 9].copy()
-                                clean_df.columns = df_sheet.iloc[header_idx, start_col_idx : start_col_idx + 9].astype(str).str.strip()
-                                
-                                clean_headers = ["Month", "Last Month Interest", "Outstanding", "Monthly Dues", "Date", "Narration", "Amount", "Balance", "Interest"]
-                                if len(clean_df.columns) == 9:
-                                    clean_df.columns = clean_headers
-                                else:
-                                    from collections import Counter
-                                    counts = Counter()
-                                    new_cols = []
-                                    for col in clean_df.columns:
-                                        new_cols.append(f"{col}_{counts[col]}" if counts[col] > 0 else col)
-                                        counts[col] += 1
-                                    clean_df.columns = new_cols
-                                
-                                clean_df = clean_df.dropna(how='all')
-                                if "Date" in clean_df.columns:
-                                    clean_df["Date"] = pd.to_datetime(clean_df["Date"], errors='coerce').dt.strftime('%Y-%m-%d').fillna("")
-                                if "Amount" in clean_df.columns:
-                                    clean_df["Amount"] = pd.to_numeric(clean_df["Amount"], errors='coerce').fillna(0)
-                                
-                                # Fill blank Month from Date (e.g. "2023-04-30" → "Apr")
-                                if "Month" in clean_df.columns and "Date" in clean_df.columns:
-                                    def derive_month(row):
-                                        val = str(row.get("Month", "")).strip().lower()
-                                        if val in ["", "nan", "none"]:
-                                            date_val = str(row.get("Date", "")).strip()
-                                            try:
-                                                return pd.to_datetime(date_val).strftime('%b')
-                                            except:
-                                                return ""
-                                        return row["Month"]
-                                    clean_df["Month"] = clean_df.apply(derive_month, axis=1)
-
-                                    
-                                # Capture Outstanding column for carry-forward
-                                if "Outstanding" in clean_df.columns:
-                                    clean_df["Outstanding"] = pd.to_numeric(clean_df["Outstanding"], errors='coerce').fillna(0)
-                                else:
-                                    clean_df["Outstanding"] = 0.0
-
-                                # *** Capture carry-forward from the VERY FIRST row BEFORE Amount filter ***
-                                # The first row in the Excel typically has the opening outstanding balance
-                                # (it may have Amount=0 and would be lost after filtering)
-                                first_outstanding_val = float(clean_df.iloc[0]["Outstanding"]) if len(clean_df) > 0 else 0.0
-
-                                keep_cols = [c for c in ["Month", "Date", "Narration", "Amount", "Outstanding"] if c in clean_df.columns]
-                                final_df = clean_df[keep_cols].copy()
-                                final_df.insert(0, "Flat Number", sheet)
-                                if "Amount" in final_df.columns:
-                                    final_df = final_df[final_df["Amount"] > 0].reset_index(drop=True)
-
-                                # Store the pre-filter first outstanding keyed by sheet name
-                                parsed_sheets[sheet] = final_df
-                                parsed_sheets[f"__cf_{sheet}"] = first_outstanding_val
-                        except Exception as sheet_err:
-                            st.error(f"Could not parse flat {sheet}: {sheet_err}")
-                    
-                    # --- Single Approve All checkbox above all tables ---
-                    approve_all = st.checkbox("Approve All Payments", key="approve_all_global")
-                    
-                    # --- Render each sheet with per-row Approved checkboxes ---
-                    all_edited = {}
-                    for sheet, final_df in parsed_sheets.items():
-                        if sheet.startswith("__cf_"):
-                            continue  # skip carry-forward float entries
-                        st.markdown(f"#### 📄 Data for Flat: **{sheet}**")
-                        final_df.insert(0, "Approved", approve_all)  # pre-fill based on master checkbox
-                        edited_df = st.data_editor(
-                            final_df,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "Approved": st.column_config.CheckboxColumn(
-                                    "Approved",
-                                    help="Tick to approve this payment. Use the header checkbox to approve all."
-                                ),
-                            },
-                            key=f"pay_editor_{sheet}"
-                        )
-                        approved_count = int(edited_df["Approved"].sum())
-                        st.markdown(
-                            f"<span style='color:#00f0ff;font-size:0.9rem;'>🔢 {approved_count} of {len(edited_df)} payment(s) selected</span>",
-                            unsafe_allow_html=True
-                        )
-                        
-                        # --- Show duplicate transactions (already in DB) ---
-                        try:
-                            import sqlalchemy as _sa
-                            _engine = get_engine()
-                            with _engine.connect() as _conn:
-                                # Check which rows from this sheet already exist in DB
-                                dup_rows = []
-                                for _, row in edited_df.iterrows():
-                                    exists = _conn.execute(_sa.text("""
-                                        SELECT 1 FROM payment_history
-                                        WHERE `Flat Number`=:flat AND `Month`=:month AND `Date`=:date AND `Amount`=:amount
-                                        LIMIT 1
-                                    """), {
-                                        "flat": row.get("Flat Number", ""),
-                                        "month": row.get("Month", ""),
-                                        "date": str(row.get("Date", "")),
-                                        "amount": float(row.get("Amount", 0))
-                                    }).fetchone()
-                                    if exists:
-                                        dup_rows.append(row.drop(labels=["Approved"]))
-                                        
-                                if dup_rows:
-                                    dup_df = pd.DataFrame(dup_rows).reset_index(drop=True)
-                                    st.warning(f"⚠️ {len(dup_rows)} transaction(s) already exist in DB (will be skipped on save):")
-                                    st.dataframe(dup_df, use_container_width=True, hide_index=True)
-                        except Exception:
-                            pass  # silently skip if DB not reachable
-                        
-                        all_edited[sheet] = edited_df
-
-                    
-                    # --- Save button: sends only approved rows ---
-                    st.markdown("---")
-                    do_update_cf = st.checkbox("Update Carry Forward Balance", value=True, help="Update the 'flat_carry_forward' table with the first outstanding value from each sheet.")
-                    if st.button("💾 Save Approved Payments to Database", type="primary"):
-                        try:
-                            import sqlalchemy
-                            engine = get_engine()
-                            rows_to_save = []
-                            for sheet, edited_df in all_edited.items():
-                                approved_rows = edited_df[edited_df["Approved"] == True].drop(columns=["Approved"])
-                                rows_to_save.append(approved_rows)
-                            combined = pd.concat(rows_to_save, ignore_index=True) if rows_to_save else pd.DataFrame()
-                            if len(combined) > 0:
-                                with st.spinner("Saving to MySQL..."):
-                                    
-                                    # Extract UTR/reference from Narration
-                                    # Priority: pure numeric tokens (10+ digits) like IMPS UTR
-                                    # Fallback: last alphanumeric token that contains digits (NEFT UTR like AXMB231969016421)
-                                    def extract_utr(narration):
-                                        import re
-                                        if not narration or str(narration).strip() in ["", "nan"]:
-                                            return None
-                                        s = str(narration).upper()
-                                        # 1st priority: pure numeric sequence of 10+ digits (IMPS UTR)
-                                        numeric_tokens = re.findall(r'\b\d{10,}\b', s)
-                                        if numeric_tokens:
-                                            return numeric_tokens[0]
-                                        # 2nd priority: alphanumeric token containing digits (NEFT-style UTR)
-                                        mixed_tokens = [t for t in re.findall(r'[A-Z0-9]{8,}', s) if any(c.isdigit() for c in t)]
-                                        if mixed_tokens:
-                                            return mixed_tokens[-1]
-                                        return None
-                                    
-                                    combined["narration_ref"] = combined.get("Narration", pd.Series([""] * len(combined))).apply(extract_utr)
-                                    
-                                    with engine.connect() as conn:
-                                        # Composite unique key: (Flat Number, Month, Date, Amount)
-                                        # narration_ref stored for reference but NOT used as unique key
-                                        # Create payment_history with Outstanding column
-                                        conn.execute(sqlalchemy.text("""
-                                            CREATE TABLE IF NOT EXISTS payment_history (
-                                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                                `Flat Number` VARCHAR(50),
-                                                `Month` VARCHAR(20),
-                                                `Date` VARCHAR(20),
-                                                `Narration` TEXT,
-                                                `Amount` DECIMAL(12,2),
-                                                `Outstanding` DECIMAL(12,2) DEFAULT 0,
-                                                `narration_ref` VARCHAR(100),
-                                                UNIQUE KEY uq_payment (`Flat Number`, `Month`, `Date`, `Amount`)
-                                            )
-                                        """))
-                                        # Add Outstanding column if it doesn't exist yet (migration)
-                                        try:
-                                            conn.execute(sqlalchemy.text("""
-                                                ALTER TABLE payment_history
-                                                ADD COLUMN IF NOT EXISTS `Outstanding` DECIMAL(12,2) DEFAULT 0
-                                            """))
-                                        except Exception:
-                                            pass  # column already exists
-                                        # Create carry-forward table
-                                        conn.execute(sqlalchemy.text("""
-                                            CREATE TABLE IF NOT EXISTS flat_carry_forward (
-                                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                                `Flat Number` VARCHAR(50) UNIQUE,
-                                                `Outstanding` DECIMAL(12,2) DEFAULT 0,
-                                                `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                                            )
-                                        """))
-                                        conn.commit()
-                                        
-                                        # Insert row by row using INSERT IGNORE to skip duplicates
-                                        inserted = 0
-                                        skipped_rows = []
-                                        for _, row in combined.iterrows():
-                                            try:
-                                                result = conn.execute(sqlalchemy.text("""
-                                                    INSERT IGNORE INTO payment_history 
-                                                    (`Flat Number`, `Month`, `Date`, `Narration`, `Amount`, `Outstanding`, `narration_ref`)
-                                                    VALUES (:flat, :month, :date, :narration, :amount, :outstanding, :ref)
-                                                """), {
-                                                    "flat": row.get("Flat Number", ""),
-                                                    "month": row.get("Month", ""),
-                                                    "date": str(row.get("Date", "")),
-                                                    "narration": row.get("Narration", ""),
-                                                    "amount": float(row.get("Amount", 0)),
-                                                    "outstanding": float(row.get("Outstanding", 0)),
-                                                    "ref": row.get("narration_ref", None)
-                                                })
-                                                if result.rowcount > 0:
-                                                    inserted += 1
-                                                else:
-                                                    skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
-                                            except Exception:
-                                                skipped_rows.append(row.drop(labels=["narration_ref"], errors="ignore"))
-                                        conn.commit()
-
-                                        # --- Store first Outstanding per flat into flat_carry_forward ---
-                                        # Use the pre-filter first row Outstanding captured during parsing
-                                        # (NOT groupby on filtered data — that picks wrong rows like September)
-                                        cf_saved = 0
-                                        if do_update_cf:
-                                            for sheet_name in all_edited.keys():
-                                                cf_key = f"__cf_{sheet_name}"
-                                                if cf_key in parsed_sheets:
-                                                    first_outstanding = parsed_sheets[cf_key]
-                                                    try:
-                                                        conn.execute(sqlalchemy.text("""
-                                                            INSERT INTO flat_carry_forward (`Flat Number`, `Outstanding`)
-                                                            VALUES (:flat, :outstanding)
-                                                            ON DUPLICATE KEY UPDATE `Outstanding` = VALUES(`Outstanding`)
-                                                        """), {
-                                                            "flat": sheet_name,
-                                                            "outstanding": float(first_outstanding),
-                                                        })
-                                                        cf_saved += 1
-                                                    except Exception:
-                                                        pass
-                                        conn.commit()
-                                 
-                                skipped = len(skipped_rows)
-                                st.success(f"✅ {inserted} payment(s) saved. {skipped} duplicate(s) skipped.")
-                                st.info(f"📌 Carry forward amount stored/updated for {cf_saved} flat(s).")
-                                if skipped_rows:
-                                    st.warning(f"⚠️ The following {skipped} transaction(s) were skipped (already in DB):")
-                                    skipped_df = pd.DataFrame(skipped_rows).reset_index(drop=True)
-                                    st.dataframe(skipped_df, use_container_width=True, hide_index=True)
-
-                            else:
-                                st.warning("⚠️ No payments selected. Tick at least one row before saving.")
-                        except Exception as db_err:
-                            st.error(f"❌ Failed to save to database: {db_err}")
-                    
-        except Exception as e:
-            st.error(f"Error reading uploaded file: {e}")
-
-
 # --- Settings Menu ---
 elif app_mode == "⚙️ Settings":
     st.title("⚙️ Global Society Settings")
@@ -3748,6 +3635,95 @@ elif app_mode == "📊 Report":
                     
             except Exception as e:
                 st.error(f"Error fetching obligation: {e}")
+
+elif app_mode == "🔎 Search":
+    st.title("🔎 Society Search")
+    st.markdown('<p class="info-text">Look up Flat Numbers using Name/Narration, or find Owner/Tenant using Flat Number.</p>', unsafe_allow_html=True)
+    
+    engine = get_engine()
+    
+    st.markdown("### 🔍 Search by Name / Narration -> Find Flat Number")
+    search_keyword = st.text_input("Enter a Name or part of a Narration:", placeholder="e.g., Vaibhav, NEFT...")
+    if st.button("Find Flats", key="btn_find_flat"):
+        if not search_keyword.strip():
+            st.warning("Please enter a keyword to search.")
+        else:
+            try:
+                kw = f"%{search_keyword.strip()}%"
+                
+                # Check flat_details (Owner/Tenant)
+                df_flats = pd.read_sql(
+                    sqlalchemy.text("SELECT `Flat No`, `Owner Name`, `Tenant Name` FROM flat_details WHERE `Owner Name` LIKE :kw OR `Tenant Name` LIKE :kw"),
+                    con=engine, params={"kw": kw}
+                )
+                
+                # Check payment_history (Narration matches)
+                df_payments = pd.read_sql(
+                    sqlalchemy.text("SELECT DISTINCT `Flat Number`, `Narration`, `Date` FROM payment_history WHERE `Narration` LIKE :kw LIMIT 100"),
+                    con=engine, params={"kw": kw}
+                )
+                
+                if df_flats.empty and df_payments.empty:
+                    st.info(f"No flat found for '{search_keyword}'.")
+                else:
+                    if not df_flats.empty:
+                        st.success(f"✅ Found in Resident Details (Flat matches):")
+                        st.dataframe(df_flats, use_container_width=True, hide_index=True)
+                    if not df_payments.empty:
+                        st.success(f"✅ Found in Payment History (Narration matches):")
+                        st.dataframe(df_payments, use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"Search failed: {e}")
+
+    st.markdown("---")
+    
+    st.markdown("### 🏠 Search by Flat Number -> Find Owner / Tenant")
+    # Fetch flat list for dropdown to make it easy
+    _flat_list = []
+    try:
+        _df_f = pd.read_sql("SELECT `Flat No` FROM flat_details", con=engine)
+        _flat_list = sorted([str(f).strip() for f in _df_f['Flat No'].dropna().unique() if str(f).strip()])
+    except:
+        pass
+        
+    search_flat = st.selectbox("Select or type Flat Number:", [""] + _flat_list, index=0)
+    
+    # Or allow free-text fallback
+    free_flat = st.text_input("Or enter Flat Number manually:", placeholder="e.g. C1-1101")
+    
+    final_flat_search = search_flat if search_flat else free_flat
+    
+    if st.button("Find Residents", key="btn_find_res") and final_flat_search:
+        try:
+            flat_kw = final_flat_search.strip()
+            
+            # Fetch from flat_details
+            df_owner = pd.read_sql(
+                sqlalchemy.text("SELECT `Flat No`, `Owner Name`, `Tenant Name`, `Contact Number` FROM flat_details WHERE `Flat No` = :f"),
+                con=engine, params={"f": flat_kw}
+            )
+            
+            # Fetch historical tenants too, if tenant_history exists
+            df_tenant_hist = pd.DataFrame()
+            try:
+                df_tenant_hist = pd.read_sql(
+                    sqlalchemy.text("SELECT `tenant_name`, `contact`, `from_date`, `to_date` FROM tenant_history WHERE `flat_no` = :f ORDER BY id DESC"),
+                    con=engine, params={"f": flat_kw}
+                )
+            except:
+                pass
+                
+            if df_owner.empty:
+                st.info(f"No records found for Flat: '{flat_kw}'.")
+            else:
+                st.success(f"✅ Current Residents for {flat_kw}:")
+                st.dataframe(df_owner, use_container_width=True, hide_index=True)
+                
+                if not df_tenant_hist.empty:
+                    st.markdown("#### 📜 Historical Tenants")
+                    st.dataframe(df_tenant_hist, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Search failed: {e}")
 
 elif app_mode == "🔑 Change Password":
     st.title("🔑 Change Your Password")
